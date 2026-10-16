@@ -45,6 +45,7 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
   const [deleteFile, setDeleteFile] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteLLMCache, setDeleteLLMCache] = useState(false)
+  const [purge, setPurge] = useState(false)
   const isConfirmEnabled = confirmText.toLowerCase() === 'yes' && !isDeleting
 
   // Reset state when dialog closes - handled in onOpenChange to avoid setState in effect
@@ -55,6 +56,7 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
       setDeleteFile(false)
       setDeleteLLMCache(false)
       setIsDeleting(false)
+      setPurge(false)
     }
   }, [])
 
@@ -63,9 +65,11 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
 
     setIsDeleting(true)
     try {
-      const result = await deleteDocuments(selectedDocIds, deleteFile, deleteLLMCache)
+      const result = await deleteDocuments(selectedDocIds, deleteFile, deleteLLMCache, purge)
 
-      if (result.status === 'deletion_started') {
+      if (result.status === 'soft_deleted') {
+        toast.success(t('documentPanel.deleteDocuments.softDeleted', { count: selectedDocIds.length }))
+      } else if (result.status === 'deletion_started') {
         toast.success(t('documentPanel.deleteDocuments.success', { count: selectedDocIds.length }))
       } else if (result.status === 'busy') {
         toast.error(t('documentPanel.deleteDocuments.busy'))
@@ -97,7 +101,7 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
     } finally {
       setIsDeleting(false)
     }
-  }, [isConfirmEnabled, selectedDocIds, deleteFile, deleteLLMCache, handleOpenChange, t, onDocumentsDeleted])
+  }, [isConfirmEnabled, selectedDocIds, deleteFile, deleteLLMCache, purge, handleOpenChange, t, onDocumentsDeleted])
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -122,9 +126,20 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
           </DialogDescription>
         </DialogHeader>
 
-        <div className="text-red-500 dark:text-red-400 font-semibold mb-4">
-          {t('documentPanel.deleteDocuments.warning')}
-        </div>
+        {!purge && (
+          <div className="mb-4">
+            <div className="font-semibold mb-1">{t('documentPanel.deleteDocuments.softDeleteTitle')}</div>
+            <div className="text-muted-foreground text-sm">
+              {t('documentPanel.deleteDocuments.softDeleteHint')}
+            </div>
+          </div>
+        )}
+
+        {purge && (
+          <div className="text-red-500 dark:text-red-400 font-semibold mb-4">
+            {t('documentPanel.deleteDocuments.warning')}
+          </div>
+        )}
 
         <div className="mb-4">
           {t('documentPanel.deleteDocuments.confirm', { count: selectedDocIds.length })}
@@ -148,30 +163,48 @@ export default function DeleteDocumentsDialog({ selectedDocIds, onDocumentsDelet
           <div className="flex items-center space-x-2">
             <input
               type="checkbox"
-              id="delete-file"
-              checked={deleteFile}
-              onChange={(e) => setDeleteFile(e.target.checked)}
+              id="purge-permanent"
+              checked={purge}
+              onChange={(e) => setPurge(e.target.checked)}
               disabled={isDeleting}
               className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
             />
-            <Label htmlFor="delete-file" className="text-sm font-medium cursor-pointer">
-              {t('documentPanel.deleteDocuments.deleteFileOption')}
+            <Label htmlFor="purge-permanent" className="text-sm font-medium cursor-pointer">
+              {t('documentPanel.deleteDocuments.purgeOption')}
             </Label>
           </div>
 
-          <div className="flex items-center space-x-2">
-            <input
-              type="checkbox"
-              id="delete-llm-cache"
-              checked={deleteLLMCache}
-              onChange={(e) => setDeleteLLMCache(e.target.checked)}
-              disabled={isDeleting}
-              className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
-            />
-            <Label htmlFor="delete-llm-cache" className="text-sm font-medium cursor-pointer">
-              {t('documentPanel.deleteDocuments.deleteLLMCacheOption')}
-            </Label>
-          </div>
+          {purge && (
+            <>
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="delete-file"
+                  checked={deleteFile}
+                  onChange={(e) => setDeleteFile(e.target.checked)}
+                  disabled={isDeleting}
+                  className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                />
+                <Label htmlFor="delete-file" className="text-sm font-medium cursor-pointer">
+                  {t('documentPanel.deleteDocuments.deleteFileOption')}
+                </Label>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="delete-llm-cache"
+                  checked={deleteLLMCache}
+                  onChange={(e) => setDeleteLLMCache(e.target.checked)}
+                  disabled={isDeleting}
+                  className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
+                />
+                <Label htmlFor="delete-llm-cache" className="text-sm font-medium cursor-pointer">
+                  {t('documentPanel.deleteDocuments.deleteLLMCacheOption')}
+                </Label>
+              </div>
+            </>
+          )}
         </div>
 
         <DialogFooter>

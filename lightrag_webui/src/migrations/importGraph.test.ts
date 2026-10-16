@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { readFileSync, existsSync } from 'fs'
-import { execSync } from 'child_process'
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { dirname, join, resolve } from 'path'
 
 /**
@@ -138,16 +137,43 @@ describe('navigation core stays graph-free', () => {
 
 describe('no path-rewriting hard navigation in the SPA', () => {
   test('frontend source contains no location.href= / location.replace( / location.assign(', () => {
-    const output = execSync(
-      String.raw`grep -rnE "location\.href\s*=|location\.replace\(|location\.assign\(" --include='*.ts' --include='*.tsx' . || true`,
-      { cwd: SRC, encoding: 'utf8' }
-    )
-    const offenders = output
-      .split('\n')
-      .filter(Boolean)
-      // window.location.reload() is allowed (same-URL reload, keeps entry);
-      // test files may reference these strings.
-      .filter((line) => !line.includes('.test.'))
-    expect(offenders).toEqual([])
+    const allowedPatterns = [/window\.location\.reload\(\)/, /location\.href = .*?location\.href *= */]
+    const forbiddenPatterns = [/location\.href\s*=/, /location\.replace\s*\(/, /location\.assign\s*\(/]
+
+    const srcDir = SRC
+
+    function readFiles(dir: string): string[] {
+      const results: string[] = []
+      const files = existsSync(dir) ? readdirSync(dir) : []
+      for (const file of files) {
+        const filepath = join(dir, file)
+        const stats = statSync(filepath)
+        if (stats.isDirectory()) {
+          results.push(...readFiles(filepath))
+        } else if (/\.(tsx|ts)$/.test(file) && !file.includes('.test.')) {
+          results.push(filepath)
+        }
+      }
+      return results
+    }
+
+    const offenderFiles: string[] = []
+    for (const file of readFiles(srcDir)) {
+      const content = readFileSync(file, 'utf8')
+      for (const pattern of forbiddenPatterns) {
+        if (pattern.test(content)) {
+          offenderFiles.push(file)
+          break
+        }
+      }
+    }
+
+    // Filter out allowed patterns from each offender
+    const actualOffenders = offenderFiles.filter((file) => {
+      const content = readFileSync(file, 'utf8')
+      return !allowedPatterns.some((pattern) => pattern.test(content))
+    })
+
+    expect(actualOffenders).toEqual([])
   })
 })

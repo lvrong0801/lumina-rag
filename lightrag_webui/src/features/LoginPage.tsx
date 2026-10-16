@@ -244,7 +244,7 @@ const LoginPage = ({ autoActivateGuest = true }: LoginPageProps) => {
       // chrome in 100vh, which can push the form under the toolbar; dvh
       // tracks the actually visible viewport, and min- lets small screens
       // scroll instead of clipping.
-      className="flex min-h-dvh w-full flex-col items-center justify-center bg-gradient-to-br from-emerald-50 to-teal-100 dark:from-gray-900 dark:to-gray-800"
+      className="flex min-h-dvh w-full flex-col items-center justify-center bg-gradient-to-br from-[#EDEDFB] to-[#DCDCFA] dark:from-gray-900 dark:to-gray-800"
       style={{
         padding:
           'calc(env(safe-area-inset-top) + 1rem) calc(env(safe-area-inset-right) + 1rem) calc(env(safe-area-inset-bottom) + 1rem) calc(env(safe-area-inset-left) + 1rem)'

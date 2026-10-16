@@ -16,6 +16,8 @@ import EmptyCard from '@/components/ui/EmptyCard'
 import Checkbox from '@/components/ui/Checkbox'
 import UploadDocumentsDialog from '@/components/documents/UploadDocumentsDialog'
 import ClearDocumentsDialog from '@/components/documents/ClearDocumentsDialog'
+import RecycleBinDialog from '@/components/documents/RecycleBinDialog'
+import WorkspaceSelector from '@/components/documents/WorkspaceSelector'
 import DeleteDocumentsDialog from '@/components/documents/DeleteDocumentsDialog'
 import PaginationControls from '@/components/ui/PaginationControls'
 import {
@@ -39,8 +41,11 @@ import {
 } from '@/api/lightrag'
 import { errorMessage } from '@/lib/utils'
 import { toast } from 'sonner'
-import { useBackendState } from '@/stores/state'
+import { useBackendState, useAuthStore } from '@/stores/state'
+import { useGraphStore } from '@/stores/graph'
 import { copyToClipboard } from '@/utils/clipboard'
+import { canWrite } from '@/lib/rbac'
+import { useWorkspaceAccess } from '@/stores/workspaceAccess'
 
 import { RefreshCwIcon, ActivityIcon, ArrowUpIcon, ArrowDownIcon, RotateCcwIcon, CheckSquareIcon, XIcon, AlertTriangle, Info, CopyIcon } from 'lucide-react'
 import PipelineStatusDialog from '@/components/documents/PipelineStatusDialog'
@@ -66,6 +71,8 @@ import {
   type DeletionProbeHandle
 } from '@/features/documentDeletionProbe'
 import usePageRestoreGeneration from '@/hooks/usePageRestoreGeneration'
+import CategorySidebar from '@/components/documents/CategorySidebar'
+import DocCategoryCell from '@/components/documents/DocCategoryCell'
 
 type StatusDisplayConfig = {
   labelKey: string
@@ -111,6 +118,17 @@ const getDisplayFileName = (doc: DocStatusResponse, maxLength: number = 20): str
     ? fileName.slice(0, maxLength) + '...'
     : fileName;
 };
+
+// Compact, width-stable timestamp — a full toLocaleString() is the widest
+// cell content in this table and its size varies by locale.
+const formatDateTime = (iso: string): string => {
+  const date = new Date(iso)
+  if (isNaN(date.getTime())) {
+    return iso
+  }
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
 
 const formatMetadata = (metadata: Record<string, any>): string => {
   const formattedMetadata = { ...metadata };
@@ -410,9 +428,23 @@ export default function DocumentManager() {
   const setShowFileName = useSettingsStore.use.setShowFileName()
   const documentsPageSize = useSettingsStore.use.documentsPageSize()
   const setDocumentsPageSize = useSettingsStore.use.setDocumentsPageSize()
+  // RBAC affordance gate: viewer with no write grant on this workspace sees
+  // no upload/clear/delete/scan controls (server enforces regardless).
+  const { role } = useAuthStore()
+  const currentWorkspace = useSettingsStore.use.currentWorkspace()
+  // Reactive subscription: setLevels() must re-render affordances, not leave a
+  // stale snapshot read from getState().
+  const workspaceLevels = useWorkspaceAccess.use.levels()
+  const canWriteDocs = canWrite(role, workspaceLevels[currentWorkspace ?? ''])
 
   // New pagination state
   const [currentPageDocs, setCurrentPageDocs] = useState<DocStatusResponse[]>([])
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
+  // Bumped whenever document↔category membership or document existence may
+  // have changed (move, delete, restore, clear, upload) — the sidebar only
+  // re-pulls its counts on this trigger.
+  const [categoryRefreshTrigger, setCategoryRefreshTrigger] = useState(0)
+  const bumpCategoryRefresh = useCallback(() => setCategoryRefreshTrigger(v => v + 1), [])
   const [pagination, setPagination] = useState<PaginationInfo>({
     page: 1,
     page_size: documentsPageSize,
@@ -675,8 +707,9 @@ export default function DocumentManager() {
     page,
     page_size: query.pageSize,
     sort_field: query.sortField,
-    sort_direction: query.sortDirection
-  }), [])
+    sort_direction: query.sortDirection,
+    category: selectedCategory
+  }), [selectedCategory])
 
   // Utility function to update component state.
   //
@@ -1164,13 +1197,19 @@ export default function DocumentManager() {
         if (!healthy) return null
         return useBackendState.getState().pipelineBusy
       },
-      refreshDocuments: () => refreshDocumentsThrottledRef.current({ auto: false }),
+      refreshDocuments: () => {
+        // The probe's "idle means finished" moment also proves the KG purge
+        // finished, so the graph cache can be invalidated without racing it.
+        useGraphStore.getState().invalidateGraphData();
+        bumpCategoryRefresh();
+        refreshDocumentsThrottledRef.current({ auto: false });
+      },
       isMounted: () => isMountedRef.current,
       onSettled: () => {
         deletionProbeActiveRef.current = false
       }
     });
-  }, []);
+  }, [bumpCategoryRefresh]);
 
   // New paginated data fetching function
   const fetchPaginatedDocuments = useCallback(async (
@@ -1382,6 +1421,12 @@ export default function DocumentManager() {
   const handleDocumentsDeleted = useCallback(async () => {
     setSelectedDocIds([])
 
+    // Drop the cached graph immediately: the purge runs in the background, but
+    // a user switching to the graph tab before the probe confirms must never
+    // see nodes the cache pretends still exist. The probe's confirming refresh
+    // invalidates again after the purge has provably finished.
+    useGraphStore.getState().invalidateGraphData();
+
     // The probe supersedes what used to be here — a single immediate refresh
     // (which raced the background deletion and returned the rows it was
     // supposed to drop), a delayed health check, and startPollingInterval(2000)
@@ -1393,6 +1438,9 @@ export default function DocumentManager() {
 
   // Handle documents cleared callback with proper interval reset
   const handleDocumentsCleared = useCallback(async () => {
+    useGraphStore.getState().invalidateGraphData();
+    bumpCategoryRefresh();
+
     // Clear current polling interval
     clearPollingInterval();
 
@@ -1422,7 +1470,7 @@ export default function DocumentManager() {
     if (currentTab === 'documents' && health && isMountedRef.current) {
       startPollingInterval(30000); // 30 seconds for idle state
     }
-  }, [clearPollingInterval, setStatusCounts, fetchDocuments, currentTab, health, startPollingInterval])
+  }, [clearPollingInterval, setStatusCounts, fetchDocuments, currentTab, health, startPollingInterval, bumpCategoryRefresh])
 
 
   // Handle showFileName change - switch sort field if currently sorting by first column.
@@ -1478,22 +1526,33 @@ export default function DocumentManager() {
   ]);
 
   return (
-    <Card className="!rounded-none !overflow-hidden flex flex-col h-full min-h-0">
+    <div className="flex h-full min-h-0 gap-3 p-3">
+      <CategorySidebar
+        selectedCategory={selectedCategory}
+        onSelect={(cat) => { setSelectedCategory(cat); setPagination(prev => ({ ...prev, page: 1 })); fetchDocuments(); }}
+        refreshTrigger={categoryRefreshTrigger}
+      />
+      <Card className="!overflow-hidden flex flex-col h-full min-h-0 flex-1">
       <CardHeader className="py-2 px-6">
-        <CardTitle className="text-lg">{t('documentPanel.documentManager.title')}</CardTitle>
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg">{t('documentPanel.documentManager.title')}</CardTitle>
+          <WorkspaceSelector onWorkspaceChange={() => window.location.reload()} />
+        </div>
       </CardHeader>
       <CardContent className="flex-1 flex flex-col min-h-0 overflow-auto">
         <div className="flex justify-between items-center gap-2 mb-2">
           <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={scanDocuments}
-              side="bottom"
-              tooltip={t('documentPanel.documentManager.scanTooltip')}
-              size="sm"
-            >
-              <RefreshCwIcon /> {t('documentPanel.documentManager.scanButton')}
-            </Button>
+            {canWriteDocs && (
+              <Button
+                variant="outline"
+                onClick={scanDocuments}
+                side="bottom"
+                tooltip={t('documentPanel.documentManager.scanTooltip')}
+                size="sm"
+              >
+                <RefreshCwIcon /> {t('documentPanel.documentManager.scanButton')}
+              </Button>
+            )}
             <Button
               variant="outline"
               onClick={() => setShowPipelineStatus(true)}
@@ -1523,13 +1582,13 @@ export default function DocumentManager() {
           )}
 
           <div className="flex gap-2">
-            {isSelectionMode && (
+            {canWriteDocs && isSelectionMode && (
               <DeleteDocumentsDialog
                 selectedDocIds={selectedDocIds}
                 onDocumentsDeleted={handleDocumentsDeleted}
               />
             )}
-            {isSelectionMode && hasCurrentPageSelection ? (
+            {canWriteDocs && isSelectionMode && hasCurrentPageSelection ? (
               (() => {
                 const buttonProps = getSelectionButtonProps();
                 const IconComponent = buttonProps.icon;
@@ -1547,12 +1606,19 @@ export default function DocumentManager() {
                 );
               })()
             ) : !isSelectionMode ? (
-              <ClearDocumentsDialog onDocumentsCleared={handleDocumentsCleared} />
+              canWriteDocs ? (
+                <ClearDocumentsDialog onDocumentsCleared={handleDocumentsCleared} />
+              ) : null
             ) : null}
-            <UploadDocumentsDialog
-              onUploadBatchAccepted={() => startActivityProbe('upload')}
-              onDocumentsUploaded={async () => { refreshDocumentsThrottled({ auto: false }) }}
-            />
+            {canWriteDocs && (
+              <RecycleBinDialog onDocumentsChanged={handleDocumentsDeleted} />
+            )}
+            {canWriteDocs && (
+              <UploadDocumentsDialog
+                onUploadBatchAccepted={() => startActivityProbe('upload')}
+                onDocumentsUploaded={async () => { bumpCategoryRefresh(); refreshDocumentsThrottled({ auto: false }) }}
+              />
+            )}
             <PipelineStatusDialog
               open={showPipelineStatus}
               onOpenChange={setShowPipelineStatus}
@@ -1715,7 +1781,7 @@ export default function DocumentManager() {
                         <TableRow className="border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/75 shadow-[inset_0_-1px_0_rgba(0,0,0,0.1)]">
                           <TableHead
                             onClick={() => handleSort('id')}
-                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
+                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none whitespace-nowrap"
                           >
                             <div className="flex items-center">
                               {showFileName
@@ -1729,13 +1795,14 @@ export default function DocumentManager() {
                               )}
                             </div>
                           </TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.summary')}</TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.status')}</TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.length')}</TableHead>
-                          <TableHead>{t('documentPanel.documentManager.columns.chunks')}</TableHead>
+                          <TableHead className="whitespace-nowrap">{t('documentPanel.documentManager.columns.summary')}</TableHead>
+                          <TableHead className="whitespace-nowrap">{t('documentPanel.documentManager.columns.category')}</TableHead>
+                          <TableHead className="whitespace-nowrap">{t('documentPanel.documentManager.columns.status')}</TableHead>
+                          <TableHead className="whitespace-nowrap text-right">{t('documentPanel.documentManager.columns.length')}</TableHead>
+                          <TableHead className="whitespace-nowrap text-right">{t('documentPanel.documentManager.columns.chunks')}</TableHead>
                           <TableHead
                             onClick={() => handleSort('created_at')}
-                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
+                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none whitespace-nowrap"
                           >
                             <div className="flex items-center">
                               {t('documentPanel.documentManager.columns.created')}
@@ -1748,7 +1815,7 @@ export default function DocumentManager() {
                           </TableHead>
                           <TableHead
                             onClick={() => handleSort('updated_at')}
-                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none"
+                            className="cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800 select-none whitespace-nowrap"
                           >
                             <div className="flex items-center">
                               {t('documentPanel.documentManager.columns.updated')}
@@ -1759,7 +1826,7 @@ export default function DocumentManager() {
                               )}
                             </div>
                           </TableHead>
-                          <TableHead className="w-16 text-center">
+                          <TableHead className="w-16 text-center whitespace-nowrap">
                             {t('documentPanel.documentManager.columns.select')}
                           </TableHead>
                         </TableRow>
@@ -1767,7 +1834,7 @@ export default function DocumentManager() {
                       <TableBody className="text-sm overflow-auto">
                         {filteredAndSortedDocs.map((doc) => (
                           <TableRow key={doc.id}>
-                            <TableCell className="truncate font-mono overflow-visible max-w-[250px]">
+                            <TableCell className="truncate font-mono overflow-visible max-w-[250px] min-w-[160px]">
                               {showFileName ? (
                                 <>
                                   <Tooltip>
@@ -1807,7 +1874,10 @@ export default function DocumentManager() {
                                 </TooltipContent>
                               </Tooltip>
                             </TableCell>
-                            <TableCell>
+                            <TableCell className="whitespace-nowrap">
+                              <DocCategoryCell doc={doc} onChange={() => { fetchDocuments(); bumpCategoryRefresh() }} />
+                            </TableCell>
+                            <TableCell className="whitespace-nowrap">
                               <div className="flex items-center">
                                 {(() => {
                                   const statusDisplay = getStatusDisplay(doc.status)
@@ -1821,13 +1891,13 @@ export default function DocumentManager() {
                                 {hasDocumentDetails(doc) && <DocumentStatusDetailsDialog doc={doc} />}
                               </div>
                             </TableCell>
-                            <TableCell>{doc.content_length ?? '-'}</TableCell>
-                            <TableCell>{doc.chunks_count ?? '-'}</TableCell>
-                            <TableCell className="truncate">
-                              {new Date(doc.created_at).toLocaleString()}
+                            <TableCell className="whitespace-nowrap text-right tabular-nums">{doc.content_length ?? '-'}</TableCell>
+                            <TableCell className="whitespace-nowrap text-right tabular-nums">{doc.chunks_count ?? '-'}</TableCell>
+                            <TableCell className="whitespace-nowrap tabular-nums">
+                              {formatDateTime(doc.created_at)}
                             </TableCell>
-                            <TableCell className="truncate">
-                              {new Date(doc.updated_at).toLocaleString()}
+                            <TableCell className="whitespace-nowrap tabular-nums">
+                              {formatDateTime(doc.updated_at)}
                             </TableCell>
                             <TableCell className="text-center">
                               <Checkbox
@@ -1848,6 +1918,7 @@ export default function DocumentManager() {
           </CardContent>
         </Card>
       </CardContent>
-    </Card>
+      </Card>
+    </div>
   )
 }

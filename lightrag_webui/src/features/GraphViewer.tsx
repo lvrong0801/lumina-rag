@@ -275,13 +275,12 @@ const GraphViewer = () => {
           )}
         </div>
 
-        <div className="bg-background/60 absolute bottom-2 left-2 flex flex-col rounded-xl border-2 backdrop-blur-lg">
+        <div className="bg-background/70 absolute bottom-2 left-2 flex flex-col rounded-xl border shadow-md backdrop-blur-sm p-1">
           <LayoutsControl />
           <ZoomControl />
           <FullScreenControl />
           <LegendButton />
           <Settings />
-          {/* <ThemeToggle /> */}
         </div>
 
         {showPropertyPanel && (

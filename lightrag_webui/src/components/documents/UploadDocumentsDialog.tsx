@@ -9,6 +9,7 @@ import {
   DialogTitle,
   DialogTrigger
 } from '@/components/ui/Dialog'
+import Checkbox from '@/components/ui/Checkbox'
 import FileUploader from '@/components/ui/FileUploader'
 import { toast } from 'sonner'
 import { supportedFileTypes } from '@/lib/constants'
@@ -20,7 +21,13 @@ import {
   type FileTypesState
 } from '@/lib/fileTypes'
 import { errorMessage } from '@/lib/utils'
-import { getSupportedFileTypes, uploadDocument } from '@/api/lightrag'
+import {
+  getSupportedFileTypes,
+  getDocumentsPaginated,
+  uploadDocument,
+  type DocStatusResponse,
+  type UploadMode
+} from '@/api/lightrag'
 
 import { UploadIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -35,6 +42,8 @@ interface UploadDocumentsDialogProps {
   onUploadBatchAccepted?: () => void
 }
 
+const UPLOAD_MODES: UploadMode[] = ['new', 'overwrite', 'incremental']
+
 export default function UploadDocumentsDialog({
   onDocumentsUploaded,
   onUploadBatchAccepted
@@ -45,6 +54,10 @@ export default function UploadDocumentsDialog({
   const [progresses, setProgresses] = useState<Record<string, number>>({})
   const [fileErrors, setFileErrors] = useState<Record<string, string>>({})
   const [fileTypes, setFileTypes] = useState<FileTypesState>({ status: 'idle' })
+  const [mode, setMode] = useState<UploadMode>('new')
+  const [targetDocIds, setTargetDocIds] = useState<string[]>([])
+  const [targetDocs, setTargetDocs] = useState<DocStatusResponse[]>([])
+  const [targetDocsLoading, setTargetDocsLoading] = useState(false)
 
   // Fetch the live allowlist + engine capability matrix while the dialog is
   // open. `loading` is entered synchronously in onOpenChange (not here) so
@@ -67,6 +80,48 @@ export default function UploadDocumentsDialog({
       })
     return () => controller.abort()
   }, [open])
+
+  // Fetch existing documents for the overwrite/incremental target picker.
+  useEffect(() => {
+    if (!open || mode === 'new') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setTargetDocs([])
+      return
+    }
+    const controller = new AbortController()
+    setTargetDocsLoading(true)
+    getDocumentsPaginated({
+      page: 1,
+      page_size: 200,
+      sort_field: 'updated_at',
+      sort_direction: 'desc',
+      status_filter: 'processed'
+    })
+      .then((res) => {
+        if (controller.signal.aborted) return
+        setTargetDocs(res.documents)
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) return
+        console.warn('Failed to fetch documents for target picker:', errorMessage(err))
+        setTargetDocs([])
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setTargetDocsLoading(false)
+      })
+    return () => controller.abort()
+  }, [open, mode])
+
+  const handleModeChange = useCallback((next: UploadMode) => {
+    setMode(next)
+    setTargetDocIds([])
+  }, [])
+
+  const toggleTarget = useCallback((id: string, checked: boolean) => {
+    setTargetDocIds((prev) =>
+      checked ? [...prev, id] : prev.filter((x) => x !== id)
+    )
+  }, [])
 
   const handleRejectedFiles = useCallback(
     (rejectedFiles: FileRejection[]) => {
@@ -98,6 +153,10 @@ export default function UploadDocumentsDialog({
 
   const handleDocumentsUpload = useCallback(
     async (filesToUpload: File[]) => {
+      if (mode !== 'new' && targetDocIds.length === 0) {
+        toast.error(t('documentPanel.uploadDocuments.target.required'))
+        return
+      }
       setIsUploading(true)
       let hasSuccessfulUpload = false
 
@@ -136,13 +195,17 @@ export default function UploadDocumentsDialog({
               [file.name]: 0
             }))
 
-            const result = await uploadDocument(file, (percentCompleted: number) => {
-              console.debug(t('documentPanel.uploadDocuments.single.uploading', { name: file.name, percent: percentCompleted }))
-              setProgresses((pre) => ({
-                ...pre,
-                [file.name]: percentCompleted
-              }))
-            })
+            const result = await uploadDocument(
+              file,
+              (percentCompleted: number) => {
+                console.debug(t('documentPanel.uploadDocuments.single.uploading', { name: file.name, percent: percentCompleted }))
+                setProgresses((pre) => ({
+                  ...pre,
+                  [file.name]: percentCompleted
+                }))
+              },
+              { mode, targetDocIds }
+            )
 
             if (result.status !== 'success') {
               uploadErrors[file.name] = result.message
@@ -185,12 +248,10 @@ export default function UploadDocumentsDialog({
                 } else {
                   errorMsg = detail || errorMsg
                 }
-              } else if (status === 400 || status === 413 || status === 429 || status === 503) {
-                // 400 invalid request, 413 body/file too large, 429 pipeline at
-                // capacity (MAX_PENDING_DOCUMENTS — the detail carries how many
-                // documents are active, how many were requested, the capacity and
-                // a retry hint), 503 document storage unavailable. Each detail is
-                // written to be shown to a user verbatim.
+              } else if (status === 400 || status === 404 || status === 413 || status === 429 || status === 503) {
+                // 400 invalid request, 404 target document missing, 413 body/file
+                // too large, 429 pipeline at capacity, 503 document storage
+                // unavailable. Each detail is written to be shown verbatim.
                 errorMsg = detail || errorMsg
               }
 
@@ -228,6 +289,11 @@ export default function UploadDocumentsDialog({
               console.error('Error refreshing documents:', err)
             })
           }
+          // Close the dialog and reset transient upload state
+          setProgresses({})
+          setFileErrors({})
+          setTargetDocIds([])
+          setOpen(false)
         }
       } catch (err) {
         console.error('Unexpected error during upload:', err)
@@ -236,7 +302,7 @@ export default function UploadDocumentsDialog({
         setIsUploading(false)
       }
     },
-    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted]
+    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted, mode, targetDocIds]
   )
 
   const uploaderInputs = deriveUploaderInputs(fileTypes)
@@ -273,8 +339,70 @@ export default function UploadDocumentsDialog({
             {t('documentPanel.uploadDocuments.description')}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Upload mode selector */}
+        <div className="flex flex-col gap-2">
+          <span className="text-sm font-medium">{t('documentPanel.uploadDocuments.mode.label')}</span>
+          <div className="flex gap-2">
+            {UPLOAD_MODES.map((m) => (
+              <Button
+                key={m}
+                type="button"
+                variant={mode === m ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => handleModeChange(m)}
+              >
+                {t(`documentPanel.uploadDocuments.mode.${m}`)}
+              </Button>
+            ))}
+          </div>
+          {mode === 'overwrite' && (
+            <p className="text-muted-foreground text-xs">{t('documentPanel.uploadDocuments.mode.overwriteHint')}</p>
+          )}
+          {mode === 'incremental' && (
+            <p className="text-muted-foreground text-xs">{t('documentPanel.uploadDocuments.mode.incrementalHint')}</p>
+          )}
+        </div>
+
+        {/* Target document picker (overwrite / incremental) */}
+        {mode !== 'new' && (
+          <div className="flex flex-col gap-2">
+            <span className="text-sm font-medium">
+              {mode === 'overwrite'
+                ? t('documentPanel.uploadDocuments.target.placeholderOverwrite')
+                : t('documentPanel.uploadDocuments.target.placeholderIncremental')}
+            </span>
+            <div className="max-h-48 overflow-y-auto rounded-md border p-2">
+              {targetDocsLoading && (
+                <div className="text-muted-foreground px-2 py-1 text-sm">
+                  {t('documentPanel.uploadDocuments.target.loading')}
+                </div>
+              )}
+              {!targetDocsLoading && targetDocs.length === 0 && (
+                <div className="text-muted-foreground px-2 py-1 text-sm">
+                  {t('documentPanel.uploadDocuments.target.empty')}
+                </div>
+              )}
+              {targetDocs.map((doc) => (
+                <label
+                  key={doc.id}
+                  className="hover:bg-muted flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm"
+                >
+                  <Checkbox
+                    checked={targetDocIds.includes(doc.id)}
+                    onCheckedChange={(checked) =>
+                      toggleTarget(doc.id, checked === true)
+                    }
+                  />
+                  <span className="truncate">{doc.file_path}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
         <FileUploader
-          maxFileCount={Infinity}
+          maxFileCount={mode === 'new' ? Infinity : 1}
           maxSize={200 * 1024 * 1024}
           description={t('documentPanel.uploadDocuments.fileTypes', {
             types: formatFileTypesLabel(

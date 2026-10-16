@@ -260,7 +260,9 @@ describe('initialDialogAcknowledgement (the shell\'s per-mount baseline)', () =>
     // wiring is one argument in a component this repo has no DOM harness to
     // render. Read the source: `useState(0)` there is the defect itself.
     const source = await Bun.file(
-      new URL('./WorkspaceApp.tsx', import.meta.url).pathname
+      // Pass the file: URL directly — `.pathname` on Windows yields a
+      // leading-slash `/E:/...` path that Bun.file cannot open.
+      new URL('./WorkspaceApp.tsx', import.meta.url)
     ).text()
     const initializer = source.match(
       /const \[dismissedDialogRequests[^=]*=\s*useState\(\s*([^)]*?)\s*\)/

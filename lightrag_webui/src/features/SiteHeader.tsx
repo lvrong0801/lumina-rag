@@ -25,7 +25,7 @@ function NavigationTab({ value, currentTab, children }: NavigationTabProps) {
       value={value}
       className={cn(
         'cursor-pointer px-2 py-1 transition-all',
-        currentTab === value ? '!bg-emerald-400 !text-zinc-50' : 'hover:bg-background/60'
+        currentTab === value ? '!bg-primary !text-primary-foreground' : 'hover:bg-background/60'
       )}
     >
       {children}
@@ -33,12 +33,14 @@ function NavigationTab({ value, currentTab, children }: NavigationTabProps) {
   )
 }
 
+// Narrow-viewport fallback: the sidebar (md:flex) owns navigation on desktop,
+// but below md the aside is display:none and these tabs are the only switcher.
 function TabsNavigation() {
   const currentTab = useSettingsStore.use.currentTab()
   const { t } = useTranslation()
 
   return (
-    <div className="flex h-8 self-center">
+    <div className="flex h-8 self-center md:hidden">
       <TabsList className="h-full gap-2">
         <NavigationTab value="documents" currentTab={currentTab}>
           {t('header.documents')}
@@ -56,7 +58,7 @@ function TabsNavigation() {
 
 export default function SiteHeader() {
   const { t } = useTranslation()
-  const { isGuestMode, coreVersion, apiVersion, username, webuiTitle, webuiDescription } = useAuthStore()
+  const { isGuestMode, coreVersion, apiVersion, username, role, webuiTitle, webuiDescription } = useAuthStore()
   const theme = useSettingsStore.use.theme()
   // Tri-state on purpose — 'unknown' (no successful /health yet) hides the
   // entry point rather than guessing; see apiDocsCapability in stores/state.ts.
@@ -80,7 +82,7 @@ export default function SiteHeader() {
   }
 
   return (
-    <header className="border-border/40 bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50 flex h-10 w-full border-b px-4 backdrop-blur">
+    <header className="border-border/40 bg-background/95 supports-[backdrop-filter]:bg-background/60 sticky top-0 z-50 flex h-12 w-full border-b px-4 backdrop-blur">
       <div className="min-w-[200px] w-auto flex items-center">
         {/* Document-relative brand link: under HashRouter the pathname always
             names this entry, so this resolves back to THIS entry — never a
@@ -90,7 +92,7 @@ export default function SiteHeader() {
           <Tooltip>
             <TooltipTrigger asChild>
               <a href={entryHomeHref(window.location.pathname)} className="flex items-center">
-                <ZapIcon className="mr-2 size-4 text-emerald-400" aria-hidden="true" />
+                <ZapIcon className="mr-2 size-4 text-primary" aria-hidden="true" />
                 <span className="font-bold md:inline-block">{SiteInfo.name}</span>
                 {webuiTitle && (
                   <>
@@ -110,7 +112,7 @@ export default function SiteHeader() {
         <TouchDescriptionPopover description={webuiDescription} />
       </div>
 
-      <div className="flex h-10 flex-1 items-center justify-center">
+      <div className="flex h-12 flex-1 items-center justify-center">
         <TabsNavigation />
         {isGuestMode && (
           <div className="ml-2 self-center px-2 py-1 text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 rounded-md">
@@ -119,8 +121,21 @@ export default function SiteHeader() {
         )}
       </div>
 
-      <nav className="w-[200px] flex items-center justify-end">
+      <nav className="flex items-center justify-end">
         <div className="flex items-center gap-2">
+          {!isGuestMode && role && role !== 'guest' && (
+            <span
+              className={cn(
+                'rounded px-1.5 py-0.5 text-[11px] leading-4',
+                role === 'admin' && 'bg-primary/10 text-primary',
+                role === 'manager' && 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
+                role === 'viewer' && 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300'
+              )}
+              title={t('header.role', 'Role')}
+            >
+              {role}
+            </span>
+          )}
           {versionDisplay && (
             <TooltipProvider>
               <Tooltip>

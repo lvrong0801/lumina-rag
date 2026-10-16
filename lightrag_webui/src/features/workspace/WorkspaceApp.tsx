@@ -134,7 +134,7 @@ export default function WorkspaceApp() {
             <Tooltip>
               <TooltipTrigger asChild>
                 <a href={entryHomeHref(window.location.pathname)} className="flex shrink-0 items-center gap-2">
-                  <ZapIcon className="size-4 text-emerald-400" aria-hidden="true" />
+                  <ZapIcon className="size-4 text-primary" aria-hidden="true" />
                   <span className="font-bold">{webuiTitle || 'LightRAG'}</span>
                 </a>
               </TooltipTrigger>

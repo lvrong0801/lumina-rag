@@ -52,8 +52,14 @@ export default function AppSettings({ className }: AppSettingsProps) {
       </PopoverTrigger>
       <PopoverContent side="bottom" align="end" className="w-56">
         <div className="flex flex-col gap-4">
+          {/* Language */}
           <div className="flex flex-col gap-2">
-            <label className="text-sm font-medium">{t('settings.language')}</label>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">{t('settings.language')}</label>
+              <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                {language.toUpperCase()}
+              </span>
+            </div>
             <Select value={language} onValueChange={handleLanguageChange}>
               <SelectTrigger>
                 <SelectValue />
@@ -75,8 +81,21 @@ export default function AppSettings({ className }: AppSettingsProps) {
             </Select>
           </div>
 
+          {/* Theme */}
           <div className="flex flex-col gap-2">
-            <label className="text-sm font-medium">{t('settings.theme')}</label>
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium">{t('settings.theme')}</label>
+              <span className={cn(
+                'inline-flex items-center gap-1.5 rounded-full px-1.5 py-0.5 text-[10px]',
+                theme === 'dark'
+                  ? 'bg-slate-800 text-slate-200'
+                  : theme === 'light'
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-muted text-muted-foreground'
+              )}>
+                {theme === 'dark' ? '● Dark' : theme === 'light' ? '○ Light' : '◐ System'}
+              </span>
+            </div>
             <Select value={theme} onValueChange={handleThemeChange}>
               <SelectTrigger>
                 <SelectValue />

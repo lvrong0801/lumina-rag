@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test'
 // Dependency-free module — safe to import statically before the mocks below.
 import { isAuthenticationRequiredError } from './errors'
+import axios from 'axios'
 
 // ---------------------------------------------------------------------------
 // Mock dependencies BEFORE importing the module under test
@@ -37,9 +38,10 @@ Object.defineProperty(globalThis, 'sessionStorage', {
 //   RESTORABLE spy (mockRestore in afterAll) so the 401 paths under test
 //   don't navigate, while later files still see the real service.
 // The remaining mock.module targets are leaf-ish dependencies where an
-// overlay is sufficient: '@/lib/constants' (spread-real, pins the base URL)
-// and 'axios' (feeds the guest-token refresh; api/lightrag is imported
-// dynamically AFTER this mock so its axios instance is the mocked one).
+// overlay is sufficient: '@/lib/constants' (spread-real, pins the base URL).
+// The guest-token refresh's axios.get call is intercepted with a restorable
+// spy instead (see mockGuestTokenRefresh below) so axios itself stays real
+// for every file that runs after this one.
 // An OVERLAY on the real module, not a replacement. `mock.module` is global for
 // the whole `bun test` run and is never undone, so a factory returning only the
 // three exports this file needs also deletes every OTHER export of that module
@@ -56,11 +58,21 @@ mock.module('@/lib/constants', () => ({
   searchLabelsDefaultLimit: 50,
 }))
 
-// Mock axios — the module calls axios.create() at top level and
-// axios.get() in silentRefreshGuestToken
-mock.module('axios', () => {
-  const instance = {
-    get: () =>
+// The guest-token 401 paths call axios.get('/auth-status') inside
+// silentRefreshGuestToken. That call is intercepted with a RESTORABLE spy
+// (registered in beforeAll, restored in afterAll) instead of
+// mock.module('axios'): a module mock would replace axios for the whole bun
+// test process and never be undone, so every later test file importing
+// api/lightrag would get the mocked axios instance at module evaluation and
+// break with "axiosInstance.defaults.adapter = adapter" TypeErrors. A spy on
+// the shared module object keeps axios.create() (which api/lightrag calls at
+// top level) real, so the axios instance it builds stays fully functional for
+// every file that runs after this one.
+let axiosGetSpy: ReturnType<typeof spyOn> | null = null
+
+const mockGuestTokenRefresh = (): void => {
+  axiosGetSpy = spyOn(axios, 'get').mockImplementation(
+    () =>
       Promise.resolve({
         data: {
           access_token: 'mock-guest-token',
@@ -69,22 +81,9 @@ mock.module('axios', () => {
           api_version: '1.0',
         },
         headers: {},
-      }),
-    post: () => Promise.resolve({ data: {}, headers: {} }),
-    interceptors: {
-      request: { use: () => {} },
-      response: { use: () => {} },
-    },
-  }
-  // The default export from axios is the main axios function, which also has
-  // .create, .get, .post, etc. as static methods.
-  const axiosFn: any = () => Promise.resolve({ data: {}, headers: {} })
-  axiosFn.create = () => instance
-  axiosFn.get = instance.get
-  axiosFn.post = instance.post
-  axiosFn.interceptors = instance.interceptors
-  return { default: axiosFn, __esModule: true }
-})
+      }) as any
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -163,10 +162,13 @@ beforeAll(async () => {
     .mockImplementation(() => {})
   const errorSpy = spyOn(console, 'error').mockImplementation(() => {})
   const warnSpy = spyOn(console, 'warn').mockImplementation(() => {})
+  mockGuestTokenRefresh()
   restoreMocks = () => {
     navSpy.mockRestore()
     errorSpy.mockRestore()
     warnSpy.mockRestore()
+    axiosGetSpy?.mockRestore()
+    axiosGetSpy = null
   }
 })
 

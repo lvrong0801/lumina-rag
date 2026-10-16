@@ -101,7 +101,7 @@ export default function WorkspaceWelcome() {
 
   return (
     <div
-      className="flex h-dvh w-screen flex-col items-center justify-center bg-gradient-to-br from-emerald-50 to-teal-100 dark:from-gray-900 dark:to-gray-800"
+      className="flex h-dvh w-screen flex-col items-center justify-center bg-gradient-to-br from-[#EDEDFB] to-[#DCDCFA] dark:from-gray-900 dark:to-gray-800"
       style={{
         // 1rem base padding extended by the device safe areas (notch,
         // Dynamic Island, home indicator).

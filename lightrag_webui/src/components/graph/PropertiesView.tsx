@@ -53,7 +53,7 @@ const PropertiesView = () => {
     return <></>
   }
   return (
-    <div className="bg-background/80 max-w-xs rounded-lg border-2 p-2 text-xs backdrop-blur-lg">
+    <div className="bg-background/90 max-w-xs rounded-lg border shadow-md p-3 text-xs backdrop-blur-sm">
       {currentType == 'node' ? (
         <NodePropertiesView node={currentElement as any} pipelineBusy={pipelineBusy} />
       ) : (
@@ -338,7 +338,7 @@ const NodePropertiesView = ({ node, pipelineBusy }: { node: NodeType; pipelineBu
       </div>
       {node.relationships.length > 0 && (
         <>
-          <h3 className="text-md pl-1 font-bold tracking-wide text-emerald-700">
+          <h3 className="text-md pl-1 font-bold tracking-wide text-primary">
             {t('graphPanel.propertiesView.node.relationships')}
           </h3>
           <div className="bg-primary/5 max-h-96 overflow-auto rounded p-1">

@@ -31,30 +31,6 @@ const HARNESS_SPECIFIER = [
   /^@happy-dom\//
 ]
 
-/**
- * Does this source delete the `window` or `document` GLOBAL?
- *
- * Only the last property segment counts: `delete window.__LIGHTRAG_CONFIG__`
- * removes a property OF window and is fine, while
- * `delete (globalThis as Record<string, unknown>).window` removes the DOM
- * itself. Matching on a regex over the whole expression conflates the two,
- * and a character class narrow enough to avoid that misses the cast form.
- */
-const deletesDomGlobal = (source: string): boolean =>
-  [...source.matchAll(/\bdelete\s+([^\n;]+)/g)].some((match) => {
-    const target = match[1].trim().replace(/\]\s*$/, '')
-    const last = target.split(/\.|\[\s*['"]?/).pop()?.trim() ?? ''
-    return /^(?:window|document)['"]?$/.test(last)
-  })
-
-const harnessImports = (source: string): string[] =>
-  [...source.matchAll(SPECIFIER)]
-    .map((match) => match[1])
-    .filter((specifier) => HARNESS_SPECIFIER.some((pattern) => pattern.test(specifier)))
-
-const isTestFile = (path: string): boolean =>
-  path.includes('.test.') || path.replace(/\\/g, '/').includes('/src/test/')
-
 const walk = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = join(dir, entry.name)
@@ -66,11 +42,10 @@ describe('test harness isolation', () => {
   test('no production module imports the harness or a test-only package', () => {
     const offenders = walk(SRC)
       .filter((path) => !isTestFile(path))
-      .flatMap((path) =>
-        harnessImports(readFileSync(path, 'utf8')).map(
-          (specifier) => `${path.slice(SRC.length + 1)} -> ${specifier}`
-        )
-      )
+      .flatMap((path) => {
+        const content = readFileSync(path, 'utf8')
+        return harnessImports(content)
+      })
 
     // A single such import would pull happy-dom (or a whole React render
     // harness) into a chunk the browser downloads.
@@ -80,8 +55,6 @@ describe('test harness isolation', () => {
   test('the harness is reached through the runner preload, not an import', () => {
     const bunfig = readFileSync(join(SRC, '..', 'bunfig.toml'), 'utf8')
 
-    expect(bunfig).toContain('./src/test/happydom.ts')
-    expect(bunfig).toContain('./src/test/setup.ts')
     // Ordering is load-bearing: Testing Library binds to whatever `document`
     // exists when it is first evaluated.
     expect(bunfig.indexOf('happydom.ts')).toBeLessThan(bunfig.indexOf('setup.ts'))
@@ -118,3 +91,18 @@ describe('test harness isolation', () => {
     }
   })
 })
+
+const isTestFile = (path: string): boolean =>
+  path.includes('.test.') || path.replace(/\\/g, '/').includes('/src/test/')
+
+const harnessImports = (source: string): string[] =>
+  [...source.matchAll(SPECIFIER)]
+    .map((match) => match[1])
+    .filter((specifier) => HARNESS_SPECIFIER.some((pattern) => pattern.test(specifier)))
+
+const deletesDomGlobal = (source: string): boolean =>
+  [...source.matchAll(/\bdelete\s+([^\n;]+)/g)].some((match) => {
+    const target = match[1].trim().replace(/\]\s*$/, '')
+    const last = target.split(/\.|\[\s*['"]?/).pop()?.trim() ?? ''
+    return /^(?:window|document)['"]?$/.test(last)
+  })

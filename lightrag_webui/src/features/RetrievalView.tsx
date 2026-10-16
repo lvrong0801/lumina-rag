@@ -21,6 +21,10 @@ export default function RetrievalView() {
   // Get current tab to determine if this tab is active (for performance optimization)
   const currentTab = useSettingsStore.use.currentTab()
   const isRetrievalTabActive = currentTab === 'retrieval'
+  // The workspace selected on the Document page. Streaming queries are routed
+  // to this workspace (see _buildStreamHeaders in api/lightrag.ts), so surface
+  // it here to make the link visible.
+  const currentWorkspace = useSettingsStore.use.currentWorkspace()
 
   const getQuerySettingsSnapshot = useCallback(
     () => useQuerySettingsStore.getState().querySettings,
@@ -61,9 +65,18 @@ export default function RetrievalView() {
 
   // Match DocumentManager's 24px content padding plus its 8px inner-card
   // margin. The resulting 32px clearance also stays above StatusIndicator.
+  // RetrievalView.test.tsx pins both numbers.
   return (
     <div className="flex size-full gap-2 overflow-hidden px-2 pb-8">
       <div className="flex grow flex-col gap-4">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs text-muted-foreground">
+            {t('retrievePanel.retrieval.workspaceLabel')}:
+            <span className="ml-1 rounded bg-muted px-1.5 py-0.5 font-medium text-foreground">
+              {currentWorkspace === '' ? 'default' : currentWorkspace}
+            </span>
+          </div>
+        </div>
         <MessageList
           messages={session.messages}
           isLoading={session.isLoading}

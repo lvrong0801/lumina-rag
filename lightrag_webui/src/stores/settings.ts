@@ -28,6 +28,14 @@ interface SettingsState {
   documentsPageSize: number
   setDocumentsPageSize: (size: number) => void
 
+  // Documents page: category sidebar collapsed to a narrow rail
+  categorySidebarCollapsed: boolean
+  setCategorySidebarCollapsed: (collapsed: boolean) => void
+
+  // Workspace settings
+  currentWorkspace: string
+  setCurrentWorkspace: (workspace: string) => void
+
   // User prompt history
   userPromptHistory: string[]
   addUserPromptToHistory: (prompt: string) => void
@@ -92,6 +100,10 @@ interface SettingsState {
   currentTab: Tab
   setCurrentTab: (tab: Tab) => void
 
+  // App-level left navigation sidebar collapsed to a narrow rail
+  sidebarCollapsed: boolean
+  setSidebarCollapsed: (collapsed: boolean) => void
+
   // Search label dropdown refresh trigger (non-persistent, runtime only)
   searchLabelDropdownRefreshTrigger: number
   triggerSearchLabelDropdownRefresh: () => void
@@ -118,7 +130,7 @@ const useSettingsStoreBase = create<SettingsState>()(
       maxEdgeSize: 1,
 
       graphQueryMaxDepth: 3,
-      graphMaxNodes: 1000,
+      graphMaxNodes: 5000,
       backendMaxGraphNodes: null,
 
       queryLabel: defaultQueryLabel,
@@ -130,6 +142,9 @@ const useSettingsStoreBase = create<SettingsState>()(
       currentTab: 'documents',
       showFileName: false,
       documentsPageSize: 10,
+      categorySidebarCollapsed: false,
+      sidebarCollapsed: false,
+      currentWorkspace: '',
 
       userPromptHistory: [...suggestedUserPrompts],
 
@@ -182,6 +197,9 @@ const useSettingsStoreBase = create<SettingsState>()(
       setShowFileName: (show: boolean) => set({ showFileName: show }),
       setShowLegend: (show: boolean) => set({ showLegend: show }),
       setDocumentsPageSize: (size: number) => set({ documentsPageSize: size }),
+      setCurrentWorkspace: (workspace: string) => set({ currentWorkspace: workspace }),
+      setCategorySidebarCollapsed: (collapsed: boolean) => set({ categorySidebarCollapsed: collapsed }),
+      setSidebarCollapsed: (collapsed: boolean) => set({ sidebarCollapsed: collapsed }),
 
       // User prompt history methods
       addUserPromptToHistory: (prompt: string) => {
@@ -273,5 +291,14 @@ const useSettingsStoreBase = create<SettingsState>()(
 )
 
 const useSettingsStore = createSelectors(useSettingsStoreBase)
+
+// One-time bump (synchronous, runs after hydration and before any component
+// renders): users who persisted the legacy 1000-node graph cap before
+// MAX_GRAPH_NODES was raised would otherwise see the "graph truncated" toast
+// on the FIRST load, because the async health-check upgrade in state.ts races
+// the graph fetch. Bumping here makes the persisted value correct immediately.
+if (useSettingsStore.getState().graphMaxNodes === 1000) {
+  useSettingsStore.getState().setGraphMaxNodes(5000)
+}
 
 export { useSettingsStore, type Theme }

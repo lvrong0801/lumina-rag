@@ -146,6 +146,15 @@ describe('flattenAcceptExtensions', () => {
     expect(flat).toContain('.md')
     expect(flat).toContain('.pdf')
   })
+
+  test('static fallback admits the built-in image engine suffixes', () => {
+    // Mirrors the backend upload allowlist when /documents/supported_file_types
+    // is unreachable: bare raster uploads route to the image engine.
+    const flat = flattenAcceptExtensions(supportedFileTypes)
+    for (const ext of ['.png', '.jpg', '.jpeg', '.webp', '.gif']) {
+      expect(flat).toContain(ext)
+    }
+  })
 })
 
 describe('formatFileTypesLabel', () => {

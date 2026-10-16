@@ -184,6 +184,12 @@ interface GraphState {
   graphDataVersion: number
   incrementGraphDataVersion: () => void
 
+  // Server-side graph data changed outside the viewer (document deleted /
+  // restored / cleared, etc.): drop the cached graphs, reopen the fetch
+  // gates and bump the version so a mounted viewer refetches and the next
+  // mount starts from an empty cache instead of painted-over stale data.
+  invalidateGraphData: () => void
+
   // Methods for updating graph elements and UI state together
   updateNodeAndSelect: (nodeId: string, entityId: string, propertyName: string, newValue: string) => Promise<void>
   updateEdgeAndSelect: (edgeId: string, dynamicId: string, sourceId: string, targetId: string, propertyName: string, newValue: string) => Promise<void>
@@ -322,6 +328,28 @@ const useGraphStoreBase = create<GraphState>()((set, get) => ({
   // Version counter implementation
   graphDataVersion: 0,
   incrementGraphDataVersion: () => set((state) => ({ graphDataVersion: state.graphDataVersion + 1 })),
+
+  // `reset()` + gate flags + version bump in ONE set call, so subscribers
+  // never observe "cache cleared but gates closed" (a version bump that
+  // raced the reset would refetch under half-cleared selection state).
+  invalidateGraphData: () =>
+    set((state) => ({
+      selectedNode: null,
+      focusedNode: null,
+      selectedEdge: null,
+      focusedEdge: null,
+      rawGraph: null,
+      sigmaGraph: null,
+      searchEngine: null,
+      moveToSelectedNode: false,
+      graphIsEmpty: false,
+      graphNodeCount: 0,
+      graphEdgeCount: 0,
+      graphDataFetchAttempted: false,
+      labelsFetchAttempted: false,
+      lastSuccessfulQueryLabel: '',
+      graphDataVersion: state.graphDataVersion + 1
+    })),
 
   // Methods for updating graph elements and UI state together
   updateNodeAndSelect: async (nodeId: string, entityId: string, propertyName: string, newValue: string) => {

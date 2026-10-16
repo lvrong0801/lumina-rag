@@ -53,7 +53,9 @@ describe('BFCache consumers', () => {
     expect(documentManagerSource).toContain(
       'pipelineActive, pageRestoreGeneration, startPollingInterval'
     )
-    expect(documentManagerSource).toContain('pageRestoreGeneration,\n    fetchPaginatedDocuments')
+    // DocumentManager.tsx may carry CRLF line endings on Windows checkouts,
+    // so the multi-line source shape is matched tolerantly.
+    expect(documentManagerSource).toMatch(/pageRestoreGeneration,\r?\n {4}fetchPaginatedDocuments/)
   })
 
   test('the initial document state is distinct from a confirmed empty response', async () => {

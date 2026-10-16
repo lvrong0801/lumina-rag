@@ -283,9 +283,15 @@ export type ReprocessFailedResponse = {
 }
 
 export type DeleteDocResponse = {
-  status: 'deletion_started' | 'busy' | 'not_allowed'
+  status: 'deletion_started' | 'soft_deleted' | 'busy' | 'not_allowed'
   message: string
   doc_id: string
+}
+
+export type RestoreDocsResponse = {
+  restored_docs: string[]
+  failed_docs: string[]
+  message: string
 }
 
 export type DocStatus =
@@ -296,6 +302,7 @@ export type DocStatus =
   | 'preprocessed'
   | 'processed'
   | 'failed'
+  | 'deleted'
 
 export type DocStatusResponse = {
   id: string
@@ -309,6 +316,10 @@ export type DocStatusResponse = {
   error_msg?: string
   metadata?: Record<string, any>
   file_path: string
+  /** doc_ids this record incrementally updated (old documents retained). */
+  incremental_of?: string[]
+  /** doc_ids this record overwrote (old documents deleted). */
+  overwrote?: string[]
 }
 
 export type TrackStatusResponse = {
@@ -325,6 +336,18 @@ export type DocumentsRequest = {
   page_size: number
   sort_field: 'created_at' | 'updated_at' | 'id' | 'file_path'
   sort_direction: 'asc' | 'desc'
+  category?: string | null
+}
+
+export type CategoryInfo = {
+  name: string
+  count: number
+}
+
+export type CategoriesResponse = {
+  categories: CategoryInfo[]
+  uncategorized_count: number
+  total_count: number
 }
 
 export type PaginationInfo = {
@@ -461,6 +484,13 @@ axiosInstance.interceptors.request.use((config) => {
   if (apiKey) {
     config.headers['X-API-Key'] = apiKey
   }
+
+  // Add workspace header only for named workspaces (empty string = default, no header needed)
+  const currentWorkspace = useSettingsStore.getState().currentWorkspace
+  if (currentWorkspace && currentWorkspace !== '') {
+    config.headers['LIGHTRAG-WORKSPACE'] = currentWorkspace
+  }
+
   return config
 })
 
@@ -791,6 +821,14 @@ function _buildStreamHeaders(): HeadersInit {
   if (apiKey) {
     headers['X-API-Key'] = apiKey;
   }
+  // Route the query to the workspace selected in the Document page. The axios
+  // interceptor above adds this header for every non-streaming request; the
+  // streaming query bypasses axios entirely, so it must be mirrored here.
+  // Empty string is the default workspace and needs no header.
+  const currentWorkspace = useSettingsStore.getState().currentWorkspace;
+  if (currentWorkspace && currentWorkspace !== '') {
+    headers['LIGHTRAG-WORKSPACE'] = currentWorkspace;
+  }
   return headers;
 }
 
@@ -1000,12 +1038,21 @@ export const insertTexts = async (texts: string[]): Promise<DocActionResponse> =
   return response.data
 }
 
+export type UploadMode = 'new' | 'overwrite' | 'incremental'
+
 export const uploadDocument = async (
   file: File,
-  onUploadProgress?: (percentCompleted: number) => void
+  onUploadProgress?: (percentCompleted: number) => void,
+  options?: { mode?: UploadMode; targetDocIds?: string[] }
 ): Promise<DocActionResponse> => {
   const formData = new FormData()
   formData.append('file', file)
+  if (options?.mode && options.mode !== 'new') {
+    formData.append('mode', options.mode)
+  }
+  if (options?.targetDocIds?.length) {
+    options.targetDocIds.forEach((id) => formData.append('target_doc_ids', id))
+  }
 
   const response = await axiosInstance.post('/documents/upload', formData, {
     headers: {
@@ -1054,13 +1101,62 @@ export const clearDocuments = async (
   return response.data
 }
 
+/**
+ * Deletes documents. Defaults to SOFT delete (purge=false): the documents go
+ * to the recycle bin (restorable via restoreDocuments, permanently removed via
+ * purgeDocuments). Pass purge=true to keep the legacy behaviour of physically
+ * deleting all associated data (irreversible, destructive pipeline slot).
+ */
 export const deleteDocuments = async (
+  docIds: string[],
+  deleteFile: boolean = false,
+  deleteLLMCache: boolean = false,
+  purge: boolean = false
+): Promise<DeleteDocResponse> => {
+  const response = await axiosInstance.delete('/documents/delete_document', {
+    data: {
+      doc_ids: docIds,
+      delete_file: deleteFile,
+      delete_llm_cache: deleteLLMCache,
+      purge
+    }
+  })
+  return response.data
+}
+
+/** Lists recycle-bin (soft-deleted) documents. */
+export const getRecycleBinDocuments = async (
+  page: number = 1,
+  pageSize: number = 50
+): Promise<PaginatedDocsResponse> => {
+  const response = await axiosInstance.get('/documents/recycle_bin', {
+    params: { page, page_size: pageSize }
+  })
+  return response.data
+}
+
+/** Restores soft-deleted documents to their previous status. */
+export const restoreDocuments = async (
+  docIds: string[]
+): Promise<RestoreDocsResponse> => {
+  const response = await axiosInstance.post('/documents/restore', {
+    doc_ids: docIds
+  })
+  return response.data
+}
+
+/** Permanently purges recycle-bin documents (physical delete, irreversible). */
+export const purgeDocuments = async (
   docIds: string[],
   deleteFile: boolean = false,
   deleteLLMCache: boolean = false
 ): Promise<DeleteDocResponse> => {
-  const response = await axiosInstance.delete('/documents/delete_document', {
-    data: { doc_ids: docIds, delete_file: deleteFile, delete_llm_cache: deleteLLMCache }
+  const response = await axiosInstance.delete('/documents/purge', {
+    data: {
+      doc_ids: docIds,
+      delete_file: deleteFile,
+      delete_llm_cache: deleteLLMCache
+    }
   })
   return response.data
 }
@@ -1405,4 +1501,164 @@ export const getDocumentsPaginatedWithTimeout = (
         reject(error)
       })
   })
+}
+
+// Workspace APIs
+export type WorkspaceInfo = {
+  name: string
+  is_default: boolean
+  /** present for non-admin callers when RBAC is enforced (read | write | admin) */
+  access_level?: string
+}
+
+export type WorkspaceResponse = {
+  status: string
+  message: string
+}
+
+export const listWorkspaces = async (): Promise<WorkspaceInfo[]> => {
+  const response = await axiosInstance.get('/workspaces')
+  return response.data
+}
+
+export const createWorkspace = async (name: string): Promise<WorkspaceResponse> => {
+  const response = await axiosInstance.post('/workspaces', { name })
+  return response.data
+}
+
+export const deleteWorkspace = async (name: string): Promise<WorkspaceResponse> => {
+  const response = await axiosInstance.delete(`/workspaces/${encodeURIComponent(name)}`)
+  return response.data
+}
+
+// ── Admin APIs (enterprise RBAC; 403 unless the caller is an admin) ─────────
+
+export type AdminUser = {
+  username: string
+  role: string
+  enabled: boolean
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export type AdminWorkspacePermission = {
+  workspace: string
+  access_level: string
+}
+
+export type AdminActionResponse = {
+  status: string
+  message: string
+}
+
+export type AuditLogEntry = {
+  id: number
+  ts: string
+  username: string | null
+  role: string | null
+  workspace: string | null
+  action: string
+  resource_type: string | null
+  resource_id: string | null
+  ip: string | null
+  user_agent: string | null
+  status: string
+  detail: Record<string, unknown> | null
+  request_id: string | null
+}
+
+export const listUsers = async (): Promise<AdminUser[]> => {
+  const response = await axiosInstance.get('/admin/users')
+  return response.data
+}
+
+export const createUser = async (user: {
+  username: string
+  password: string
+  role: string
+  enabled?: boolean
+}): Promise<AdminActionResponse> => {
+  const response = await axiosInstance.post('/admin/users', user)
+  return response.data
+}
+
+export const updateUser = async (
+  username: string,
+  patch: { password?: string; role?: string; enabled?: boolean }
+): Promise<AdminActionResponse> => {
+  const response = await axiosInstance.patch(`/admin/users/${encodeURIComponent(username)}`, patch)
+  return response.data
+}
+
+export const deleteUser = async (username: string): Promise<AdminActionResponse> => {
+  const response = await axiosInstance.delete(`/admin/users/${encodeURIComponent(username)}`)
+  return response.data
+}
+
+export const listUserPermissions = async (username: string): Promise<AdminWorkspacePermission[]> => {
+  const response = await axiosInstance.get(
+    `/admin/users/${encodeURIComponent(username)}/permissions`
+  )
+  return response.data
+}
+
+export const setUserPermission = async (
+  username: string,
+  workspace: string,
+  accessLevel: string
+): Promise<AdminActionResponse> => {
+  const response = await axiosInstance.put(
+    `/admin/users/${encodeURIComponent(username)}/permissions/${encodeURIComponent(workspace)}`,
+    { access_level: accessLevel }
+  )
+  return response.data
+}
+
+export const deleteUserPermission = async (
+  username: string,
+  workspace: string
+): Promise<AdminActionResponse> => {
+  const response = await axiosInstance.delete(
+    `/admin/users/${encodeURIComponent(username)}/permissions/${encodeURIComponent(workspace)}`
+  )
+  return response.data
+}
+
+export const queryAuditLogs = async (params: {
+  username?: string
+  workspace?: string
+  action?: string
+  status?: string
+  start?: string
+  end?: string
+  limit?: number
+  offset?: number
+}): Promise<AuditLogEntry[]> => {
+  const response = await axiosInstance.get('/audit/logs', { params })
+  return response.data
+}
+
+
+// --- Document categories ---
+
+export async function listCategories(): Promise<CategoriesResponse> {
+  const response = await axiosInstance.get('/documents/categories')
+  return response.data
+}
+
+export async function createCategory(name: string): Promise<{ name: string }> {
+  const response = await axiosInstance.post('/documents/categories', { name })
+  return response.data
+}
+
+export async function renameCategory(oldName: string, newName: string): Promise<void> {
+  await axiosInstance.put(`/documents/categories/${encodeURIComponent(oldName)}`, { new_name: newName })
+}
+
+export async function deleteCategory(name: string): Promise<void> {
+  await axiosInstance.delete(`/documents/categories/${encodeURIComponent(name)}`)
+}
+
+export async function assignDocumentCategory(docId: string, category: string): Promise<void> {
+  await axiosInstance.put(`/documents/${encodeURIComponent(docId)}/category`, { category })
 }

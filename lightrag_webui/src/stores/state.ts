@@ -48,6 +48,7 @@ interface AuthState {
   coreVersion: string | null;
   apiVersion: string | null;
   username: string | null; // login username
+  role: string | null; // RBAC role from JWT (admin | manager | viewer | guest)
   webuiTitle: string | null; // Custom title
   webuiDescription: string | null; // Title description
   lastTokenRenewal: string | null; // Human-readable local time of last token renewal (for debugging and monitoring)
@@ -130,6 +131,10 @@ const useBackendStateStoreBase = create<BackendState>()((set, get) => ({
             // Auto-adjust current graphMaxNodes if it exceeds the new backend limit
             const currentMaxNodes = useSettingsStore.getState().graphMaxNodes
             if (currentMaxNodes > maxNodes) {
+              useSettingsStore.getState().setGraphMaxNodes(maxNodes, true)
+            } else if (currentMaxNodes === 1000 && maxNodes > 1000) {
+              // One-time upgrade: users still on the legacy default (1000) get
+              // the new, higher backend cap so the graph is no longer truncated.
               useSettingsStore.getState().setGraphMaxNodes(maxNodes, true)
             }
           }
@@ -268,6 +273,11 @@ const getUsernameFromToken = (token: string): string | null => {
   return payload.sub || null;
 };
 
+const getRoleFromToken = (token: string): string | null => {
+  const payload = parseTokenPayload(token);
+  return payload.role || null;
+};
+
 const isGuestToken = (token: string): boolean => {
   const payload = parseTokenPayload(token);
   return payload.role === 'guest';
@@ -317,7 +327,7 @@ export const clearLocalToken = (): void => {
   }
 };
 
-export const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; coreVersion: string | null; apiVersion: string | null; username: string | null; webuiTitle: string | null; webuiDescription: string | null; lastTokenRenewal: string | null; tokenExpiresAt: number | null } => {
+export const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolean; coreVersion: string | null; apiVersion: string | null; username: string | null; role: string | null; webuiTitle: string | null; webuiDescription: string | null; lastTokenRenewal: string | null; tokenExpiresAt: number | null } => {
   let token = localStorage.getItem(TOKEN_STORAGE_KEY);
   if (token && !isTokenLocallyValid(token)) {
     // Expired or structurally broken: clear it (and its companions) and
@@ -334,6 +344,7 @@ export const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolea
   // not resurrected into the store.
   const lastTokenRenewal = localStorage.getItem('LIGHTRAG-LAST-TOKEN-RENEWAL');
   const username = token ? getUsernameFromToken(token) : null;
+  const role = token ? getRoleFromToken(token) : null;
   const tokenExpiresAt = token ? getTokenExpiresAt(token) : null;
 
   if (!token) {
@@ -343,6 +354,7 @@ export const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolea
       coreVersion: coreVersion,
       apiVersion: apiVersion,
       username: null,
+      role: null,
       webuiTitle: webuiTitle,
       webuiDescription: webuiDescription,
       lastTokenRenewal: null,
@@ -356,6 +368,7 @@ export const initAuthState = (): { isAuthenticated: boolean; isGuestMode: boolea
     coreVersion: coreVersion,
     apiVersion: apiVersion,
     username: username,
+    role: role,
     webuiTitle: webuiTitle,
     webuiDescription: webuiDescription,
     lastTokenRenewal: lastTokenRenewal,
@@ -373,6 +386,7 @@ export const useAuthStore = create<AuthState>(set => {
     coreVersion: initialState.coreVersion,
     apiVersion: initialState.apiVersion,
     username: initialState.username,
+    role: initialState.role,
     webuiTitle: initialState.webuiTitle,
     webuiDescription: initialState.webuiDescription,
     lastTokenRenewal: initialState.lastTokenRenewal,
@@ -401,6 +415,7 @@ export const useAuthStore = create<AuthState>(set => {
       }
 
       const username = getUsernameFromToken(token);
+      const role = getRoleFromToken(token);
       const tokenExpiresAt = getTokenExpiresAt(token);
       const now = Date.now();
       const formattedTime = formatTimestampToLocalString(now);
@@ -412,6 +427,7 @@ export const useAuthStore = create<AuthState>(set => {
         isAuthenticated: true,
         isGuestMode: isGuest,
         username: username,
+        role: role,
         coreVersion: coreVersion,
         apiVersion: apiVersion,
         webuiTitle: webuiTitle,
@@ -434,6 +450,7 @@ export const useAuthStore = create<AuthState>(set => {
         isAuthenticated: false,
         isGuestMode: false,
         username: null,
+        role: null,
         coreVersion: coreVersion,
         apiVersion: apiVersion,
         webuiTitle: webuiTitle,

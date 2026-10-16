@@ -9,9 +9,9 @@ import SiteHeader from './SiteHeader'
 
 const DESCRIPTION = 'Production cluster — read only'
 
-// SiteHeader lives inside the app's <Tabs> root (App.tsx), and its
-// TabsNavigation would throw outside one. Nothing else about Tabs matters
-// here, so the value is fixed.
+// SiteHeader renders inside the app's <Tabs> root in App.tsx. Navigation
+// moved to the sidebar, so the wrapper is no longer required — it is kept
+// to mirror the production mount. Note: radix Tabs requires a value.
 const renderHeader = () =>
   renderWithProviders(
     <Tabs value="documents">
