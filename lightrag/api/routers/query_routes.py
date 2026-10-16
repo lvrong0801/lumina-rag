@@ -3,13 +3,15 @@ This module contains all query-related routes for the LightRAG API.
 """
 
 import asyncio
+import inspect
 import json
 import time
 from typing import Any, Dict, List, Literal, Optional
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
+from fastapi.params import Depends as DependsMarker
 from lightrag.base import QueryParam
 from lightrag.api.input_limits import count_conversation_input_chars
-from lightrag.api.utils_api import get_combined_auth_dependency, internal_server_error
+from lightrag.api.utils_api import get_combined_auth_dependency, internal_server_error, authorize
 from lightrag.constants import (
     MAX_KEYWORD_CHARS,
     MAX_KEYWORDS_PER_LIST,
@@ -364,19 +366,134 @@ class StreamChunkResponse(BaseModel):
     )
 
 
-def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
+def create_query_routes(get_rag_dependency, api_key: Optional[str] = None, top_k: int = 60):
+    # Backward compatibility: pre-workspace callers pass a ready LightRAG
+    # instance; the enterprise wiring passes a per-request factory callable.
+    # A LightRAG instance is callable, so only true functions/methods/classes
+    # count as factories.
+    if not (
+        inspect.isfunction(get_rag_dependency)
+        or inspect.ismethod(get_rag_dependency)
+        or inspect.isclass(get_rag_dependency)
+    ):
+        _rag = get_rag_dependency
+        get_rag_dependency = lambda: _rag
+
+    async def _ensure_rag(rag):
+        # FastAPI resolves the Depends marker into a LightRAG instance before
+        # invoking the endpoint; unit tests that call the endpoint directly
+        # leave the raw Depends object, so resolve through the factory then.
+        # The pre-workspace object-compat lambda takes no arguments, which is
+        # exactly the direct-call case.
+        if isinstance(rag, DependsMarker):
+            resolved = get_rag_dependency()
+            if inspect.isawaitable(resolved):
+                return await resolved
+            return resolved
+        return rag
+
+    async def _filter_access(http_request, rag, references, chunks):
+        """Reference/chunk access filter (soft-delete + owner isolation).
+
+        Soft-delete exclusion is unconditional; owner isolation is active only
+        when the process-wide RBAC manager enforces (otherwise live documents
+        pass through untouched, preserving legacy single-tenant behaviour).
+        """
+        if http_request is None:
+            return references, chunks
+        account = getattr(http_request.state, "account", None) or {}
+        root_app = getattr(http_request, "app", None)
+        rbac_manager = None
+        if root_app is not None:
+            app_state = getattr(root_app, "state", None)
+            if app_state is not None:
+                rbac_manager = getattr(app_state, "rbac_manager", None)
+        from lightrag.api.reference_access import filter_references_and_chunks
+
+        workspace = http_request.headers.get("LIGHTRAG-WORKSPACE", "") or ""
+        return await filter_references_and_chunks(
+            references,
+            chunks,
+            rag=rag,
+            account=account,
+            workspace=workspace,
+            rbac_manager=rbac_manager,
+        )
+
+    async def _filter_entities_access(http_request, rag, entities, relationships):
+        """Entity/relationship access filter for /query/data (soft-delete + owner)."""
+        if http_request is None:
+            return entities, relationships
+        account = getattr(http_request.state, "account", None) or {}
+        root_app = getattr(http_request, "app", None)
+        rbac_manager = None
+        if root_app is not None:
+            app_state = getattr(root_app, "state", None)
+            if app_state is not None:
+                rbac_manager = getattr(app_state, "rbac_manager", None)
+        from lightrag.api.reference_access import filter_entities_and_relations
+
+        workspace = http_request.headers.get("LIGHTRAG-WORKSPACE", "") or ""
+        return await filter_entities_and_relations(
+            entities,
+            relationships,
+            rag=rag,
+            account=account,
+            workspace=workspace,
+            rbac_manager=rbac_manager,
+        )
+
     # Fresh router per call. A module-level instance would accumulate
     # duplicate routes when the factory is invoked more than once in the
     # same process (e.g. across tests), which triggers FastAPI's
     # "Duplicate Operation ID" warnings.
     router = APIRouter(tags=["query"])
 
+    async def _build_access_filter(http_request):
+        """Snapshot the requester's access scope for pre-generation filtering.
+
+        Fills ``QueryParam.access_filter`` so the retrieval pipelines drop
+        owner-isolated chunks before the LLM answer is generated (and so the
+        answer cache is keyed per user). Returns None for unauthenticated /
+        non-enforcing setups, preserving legacy behaviour.
+        """
+        if http_request is None:
+            return None
+        account = getattr(http_request.state, "account", None) or {}
+        username = account.get("username")
+        role = account.get("role")
+        workspace = http_request.headers.get("LIGHTRAG-WORKSPACE", "") or ""
+        perms: dict[str, str] = {}
+        rbac_manager = None
+        root_app = getattr(http_request, "app", None)
+        if root_app is not None:
+            app_state = getattr(root_app, "state", None)
+            if app_state is not None:
+                rbac_manager = getattr(app_state, "rbac_manager", None)
+        if (
+            username
+            and rbac_manager is not None
+            and getattr(rbac_manager, "enforce", False)
+        ):
+            try:
+                perms = (await rbac_manager.get_permissions(username)) or {}
+            except Exception:
+                perms = {}
+        return {
+            "username": username,
+            "role": role,
+            "workspace": workspace,
+            "perms": perms,
+            "is_service_admin": bool(account.get("is_service_admin")),
+        }
+
     combined_auth = get_combined_auth_dependency(api_key)
+    authorize_read = authorize("read")
 
     @router.post(
         "/query",
         response_model=QueryResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
         responses={
             200: {
                 "description": "Successful RAG query response",
@@ -515,7 +632,11 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text(request: QueryRequest):
+    async def query_text(
+        request: QueryRequest,
+        rag=Depends(get_rag_dependency),
+        http_request: Request = None,
+    ):
         """
         Comprehensive RAG query endpoint with non-streaming response. Parameter "stream" is ignored.
 
@@ -591,12 +712,16 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                 - 422: Request validation failed (e.g., query empty or too short)
                 - 500: Internal processing error (e.g., LLM service unavailable)
         """
+        rag = await _ensure_rag(rag)
         try:
             param = request.to_query_params(
                 False
             )  # Ensure stream=False for non-streaming endpoint
             # Force stream=False for /query endpoint regardless of include_references setting
             param.stream = False
+            # Pre-generation access scope: drops owner-isolated chunks before
+            # the LLM answer is produced and splits the answer cache per user.
+            param.access_filter = await _build_access_filter(http_request)
             # Unified approach: always use aquery_llm for both cases
             start_time = time.perf_counter()
             result = await rag.aquery_llm(request.query, param=param)
@@ -606,6 +731,14 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             llm_response = result.get("llm_response", {})
             data = result.get("data", {})
             references = data.get("references", [])
+            chunks = data.get("chunks", [])
+
+            # Soft-delete + owner-isolation filtering (no-op unless
+            # RBAC_ENFORCE=true). Runs BEFORE chunk-content enrichment so the
+            # reference_id mapping stays consistent.
+            references, chunks = await _filter_access(
+                http_request, rag, references, chunks
+            )
 
             # Get the non-streaming response content
             response_content = llm_response.get("content", "")
@@ -619,7 +752,6 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
 
             # Enrich references with chunk content if requested
             if request.include_references and request.include_chunk_content:
-                chunks = data.get("chunks", [])
                 # Create a mapping from reference_id to chunk content
                 ref_id_to_content = {}
                 for chunk in chunks:
@@ -744,7 +876,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
 
     @router.post(
         "/query/stream",
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
         responses={
             200: {
                 "description": "Flexible RAG query response - format depends on stream parameter",
@@ -834,7 +966,11 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_text_stream(request: QueryRequest):
+    async def query_text_stream(
+        request: QueryRequest,
+        rag=Depends(get_rag_dependency),
+        http_request: Request = None,
+    ):
         """
         Advanced RAG query endpoint with flexible streaming response.
 
@@ -985,10 +1121,13 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             This endpoint is ideal for applications requiring flexible response delivery.
             Use streaming mode for real-time interfaces and non-streaming for batch processing.
         """
+        rag = await _ensure_rag(rag)
         try:
             # Use the stream parameter from the request, defaulting to True if not specified
             stream_mode = request.stream if request.stream is not None else True
             param = request.to_query_params(stream_mode)
+            # Pre-generation access scope (owner isolation + per-user cache key).
+            param.access_filter = await _build_access_filter(http_request)
 
             from fastapi.responses import StreamingResponse
 
@@ -1060,6 +1199,17 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
                             return
 
                         # Yield references + LLM response chunks + response_time.
+                        # Filter result data first so the generator never sees
+                        # denied references.
+                        _data_dict = result.get("data", {})
+                        _refs, _chunks = await _filter_access(
+                            http_request,
+                            rag,
+                            _data_dict.get("references", []),
+                            _data_dict.get("chunks", []),
+                        )
+                        _data_dict["references"] = _refs
+                        _data_dict["chunks"] = _chunks
                         stream_gen = _build_stream_generator(
                             result=result,
                             include_references=include_references,
@@ -1089,6 +1239,15 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             else:
                 # Default path: no progress events, original protocol order preserved.
                 result = await rag.aquery_llm(request.query, param=param)
+                _data_dict = result.get("data", {})
+                _refs, _chunks = await _filter_access(
+                    http_request,
+                    rag,
+                    _data_dict.get("references", []),
+                    _data_dict.get("chunks", []),
+                )
+                _data_dict["references"] = _refs
+                _data_dict["chunks"] = _chunks
                 stream_gen = _build_stream_generator(
                     result=result,
                     include_references=request.include_references,
@@ -1114,7 +1273,7 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
     @router.post(
         "/query/data",
         response_model=QueryDataResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
         responses={
             200: {
                 "description": "Successful data retrieval response with structured RAG data",
@@ -1420,7 +1579,11 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             },
         },
     )
-    async def query_data(request: QueryRequest):
+    async def query_data(
+        request: QueryRequest,
+        rag=Depends(get_rag_dependency),
+        http_request: Request = None,
+    ):
         """
         Advanced data retrieval endpoint for structured RAG analysis.
 
@@ -1523,12 +1686,35 @@ def create_query_routes(rag, api_key: Optional[str] = None, top_k: int = 60):
             This endpoint always includes references regardless of the include_references parameter,
             as structured data analysis typically requires source attribution.
         """
+        rag = await _ensure_rag(rag)
         try:
             param = request.to_query_params(False)  # No streaming for data endpoint
+            # Pre-generation access scope (owner isolation + per-user cache key).
+            param.access_filter = await _build_access_filter(http_request)
             response = await rag.aquery_data(request.query, param=param)
 
             # aquery_data returns the new format with status, message, data, and metadata
             if isinstance(response, dict):
+                # Soft-delete + owner-isolation filtering on references/chunks.
+                _data_dict = response.get("data", {})
+                _refs, _chunks = await _filter_access(
+                    http_request,
+                    rag,
+                    _data_dict.get("references", []),
+                    _data_dict.get("chunks", []),
+                )
+                _data_dict["references"] = _refs
+                _data_dict["chunks"] = _chunks
+                # Also filter entities/relationships: their description + file_path
+                # are a direct data-exfiltration channel, independent of the LLM.
+                _ents, _rels = await _filter_entities_access(
+                    http_request,
+                    rag,
+                    _data_dict.get("entities", []),
+                    _data_dict.get("relationships", []),
+                )
+                _data_dict["entities"] = _ents
+                _data_dict["relationships"] = _rels
                 return QueryDataResponse(**response)
             else:
                 # Handle unexpected response format

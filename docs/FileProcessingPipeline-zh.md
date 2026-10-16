@@ -71,7 +71,7 @@ MINERU_LOCAL_ENDPOINT=http://localhost:8000
 └─ 规则适用的后缀；`*` 匹配任意后缀
 ```
 
-所以第一条规则的意思是"任何文件都交给 `native` 解析，三种模态全部分析，用 `P` 分块"，第二条是"第一条处理不了的，退回 `legacy` 并用 `R` 分块"。当引擎不支持该后缀、或外部引擎没有配置服务端点时，该规则会被跳过——这正是 `*:native-iteP` 实际只接管 `docx` / `md` / `textpack`、其余文件全部落到 `legacy` 的原因。
+所以第一条规则的意思是"任何文件都交给 `native` 解析，三种模态全部分析，用 `P` 分块"，第二条是"第一条处理不了的，退回 `legacy` 并用 `R` 分块"。当引擎不支持该后缀、或外部引擎没有配置服务端点时，该规则会被跳过——这正是 `*:native-iteP` 实际只接管 `docx` / `md` / `textpack`、其余文件全部落到 `legacy` 的原因。位图图片后缀（`png` / `jpg` / `jpeg` / `webp` / `gif`）在这里**一条规则都不命中**——`native` 与 `legacy` 都不支持它们——最终通过 §2.7 的按后缀默认值落到内置的 `image` 引擎。
 
 完整语法见 §2.3，选项字母见 §2.1，各引擎见 §3。
 
@@ -166,10 +166,11 @@ filename.[-OPTIONS].ext
   | --- | --- | --- |
   | `legacy` | 纯文本抽取，不产出 sidecar | 想保持升级前的行为，或文档本来就是纯文本 |
   | `native` | 内置结构化抽取器，完全本地，不依赖外部服务 | `docx` / `md` / `textpack`，且希望不部署任何东西就用上 `P` 分块或模态分析 |
+  | `image` | 内置独立图片抽取器，完全本地，不依赖外部服务 | 直接上传的 `png` / `jpg` / `jpeg` / `webp` / `gif`，希望图片内容经 VLM 分析后可被检索 |
   | `mineru` | 外部 MinerU 服务 | PDF、扫描件，以及需要版面识别与 OCR 的 office / 图片格式 |
   | `docling` | 外部 docling-serve | MinerU 的替代方案；也是内置路径里唯一能出 LaTeX 公式的 |
 
-  只有 `native`、`mineru`、`docling` 会产出 sidecar，因此也只有它们能支撑 `i` / `t` / `e` 选项与 `P` 分块器。各引擎的能力、配置与部署见 [§3](#3-文件解析引擎)。
+  只有 `native`、`image`、`mineru`、`docling` 会产出 sidecar，因此也只有它们能支撑 `i` / `t` / `e` 选项与 `P` 分块器。各引擎的能力、配置与部署见 [§3](#3-文件解析引擎)。
 - `OPTIONS` 是处理选项字符组合，例如 `iet`、`R!`、`P`。选项最终写入 `process_options`，由后续流水线阶段读取。
 - `ENGINE-OPTIONS` 中的连字符只用于分隔引擎和选项，不属于选项本身。
 - 仅指定处理选项时必须写成 `[-OPTIONS]`，例如 `[-!]`。无横线的 `[abc]` 会被严格解释为引擎名并报错，不会回退为选项串。
@@ -260,8 +261,9 @@ Server 部署可以通过 `CUSTOM_CHUNKER=<注册名>`（或 `--custom-chunker`�
 - 启动时会严格校验 `LIGHTRAG_PARSER`：未知内容提取引擎、错误后缀写法、显式使用不支持的后缀、外部引擎缺少 endpoint、处理选项中的非法字符都会导致启动失败。
 - **通配符规则匹配某后缀时**，引擎需通过两道可用性检查（见 `parser_routing._engine_is_usable`）：(a) 该引擎能力表支持此后缀；(b) 若是外部引擎（`mineru` / `docling`），对应 endpoint/token 环境变量已配置。任一检查不过，本规则跳过，继续匹配下一条规则。例如 `*:mineru;html:docling` 中：MinerU 不支持 `html` 后缀（条件 a 不过），`html` 继续命中 `docling`；如果 `MINERU_API_MODE=local` 但未设置 `MINERU_LOCAL_ENDPOINT`，所有 PDF 也会跳过 `*:mineru` 落到下一条规则（条件 b 不过）。这一行为对 `LIGHTRAG_PARSER` 规则匹配和文件名 hint 引擎选择都生效。
 - 文件名 hint 的优先级高于 `LIGHTRAG_PARSER`。如果 hint 指定的引擎不支持该后缀，系统会回退到默认规则继续选择可用引擎。
-- 如果文件名 hint 提供了非空选项串，则以 hint 为准；否则使用 `LIGHTRAG_PARSER` 规则中匹配项的默认选项；都没有则使用全部默认。
-- 如果所有规则都不可用，文件内容提取方式会回退到 `legacy`；如果 `legacy` 也不支持对应的文件后缀，会向系统添加一个错误条目，上传文件保留在 `INPUT` 目录。
+- 如果文件名 hint 提供了非空选项串，则以 hint 为准；否则使用 `LIGHTRAG_PARSER` 规则中匹配项的默认选项；都没有则使用按后缀默认值（位图图片后缀默认 `i`；其余后缀没有默认选项）。
+- 有两类后缀内置了默认引擎，在 hint 与 `LIGHTRAG_PARSER` 规则都未命中时生效：`.textpack` 路由到 `native`；位图图片后缀 `png` / `jpg` / `jpeg` / `webp` / `gif` 路由到 `image` 并预选 `i` 选项（即上传的图片默认交给 VLM 分析——`VLM_PROCESS_ENABLE=false` 时这类文档会在分析阶段**硬失败**；不想用 VLM 的关闭方式见 §3.8）。
+- 如果规则、hint 与按后缀默认值都不可用，文件内容提取方式会回退到 `legacy`；如果 `legacy` 也不支持对应的文件后缀，会向系统添加一个错误条目，上传文件保留在 `INPUT` 目录。
 - F/R/V/P/C 至多出现一个；同一选项重复时只生效一次但不报错。
 - 大小写敏感：分块选项 F/R/V/P/C 必须大写；其它选项 i/t/e 小写。
 - 中括号内出现非法字符时，整个 hint 失效，引擎按默认规则解析，选项按 `LIGHTRAG_PARSER` 默认或全部默认；同时落日志 warning。
@@ -276,6 +278,7 @@ Server 部署可以通过 `CUSTOM_CHUNKER=<注册名>`（或 `--custom-chunker`�
 | --- | --- | --- |
 | `legacy` | 旧版提取方式，在加入流水线前集中提取内容 | `txt` `md` `mdx` `pdf` `docx` `pptx` `xlsx` `rtf` `odt` `tex` `epub` `html` `htm` `csv` `json` `xml` `yaml` `yml` `log` `conf` `ini` `properties` `sql` `bat` `sh` `c` `h` `cpp` `hpp` `py` `java` `js` `ts` `swift` `go` `rb` `php` `css` `scss` `less` |
 | `native` | 内置智能结构化内容抽取器 | `docx` `md` `textpack` |
+| `image` | 内置独立图片抽取器；把一张上传的位图变成只含一个 drawing 的 sidecar，供 VLM 分析 | `png` `jpg` `jpeg` `webp` `gif` |
 | `mineru` | 外部 MinerU 内容提取引擎 | `pdf` `docx` `pptx` `xlsx` `png` `jpg` `jpeg` `jp2` `webp` `gif` `bmp`（可扩展，见 `MINERU_ADDITIONAL_SUFFIXES`） |
 | `docling` | 外部 Docling 内容提取引擎 | `pdf` `docx` `pptx` `xlsx` `md` `html` `xhtml` `png` `jpg` `jpeg` `tiff` `webp` `bmp`（可扩展，见 `DOCLING_ADDITIONAL_SUFFIXES`） |
 
@@ -287,7 +290,7 @@ LightRAG 在本地会缓存 `mineru` 和 `docling` 引擎的解析结果。重�
 
 ### 3.2 使用 legacy 内容抽取器
 
-`legacy` 是除 `.textpack`（路由层强制交给 `native`）之外所有后缀的兜底引擎，也是不配置 `LIGHTRAG_PARSER` 时的默认行为。它只抽取纯文本，由此带来四个在把文件路由给它之前值得先知道的后果：
+`legacy` 是除两类有按后缀默认值的后缀之外所有后缀的兜底引擎——`.textpack` 路由层强制交给 `native`；位图图片后缀（`png` / `jpg` / `jpeg` / `webp` / `gif`）默认交给 `image`（§3.8）。它也是不配置 `LIGHTRAG_PARSER` 时的默认行为。它只抽取纯文本，由此带来四个在把文件路由给它之前值得先知道的后果：
 
 - **它永不产出 sidecar。** 输出是 `parse_format=raw`，不存在 `drawings.json` / `tables.json` / `equations.json` 供分析阶段读取。因此 `i` / `t` / `e` 选项对 legacy 解析的文档完全无效，`P` 也会因为没有标题结构可切而退化为 `R`（§2.7）。
 - **它没有原始缓存目录**，所以 `LIGHTRAG_FORCE_REPARSE_*` 对它不适用（§3.7）。
@@ -302,6 +305,7 @@ LightRAG 在本地会缓存 `mineru` 和 `docling` 引擎的解析结果。重�
 
 - `docx`、`md` 默认仍走 `legacy`，需显式选择 native，例如默认规则 `LIGHTRAG_PARSER=docx:native`、`LIGHTRAG_PARSER=md:native`，或文件名 hint `report.[native-iet].docx`、`notes.[native].md`（语法见 [§2.4](#24-默认规则lightrag_parser) / [§2.5](#25-单文件覆盖文件名-hint)）。
 - `textpack` 为 native 独占后缀，无需 hint/规则即自动路由到 native。
+- 位图图片（`png` / `jpg` / `jpeg` / `webp` / `gif`）由独立的 `image` 引擎处理（§3.8），不归 `native`；通配或 hint 指定的 `native` 规则永远不会命中这些后缀。
 
 #### docx 抽取能力
 
@@ -509,9 +513,30 @@ LIGHTRAG_PARSER=pdf:mineru(language=en);*:legacy-R                       # 规�
 | `native` | `<base>.native_raw/` | markdown / textpack 路径下载的外部图片 | `LIGHTRAG_FORCE_REPARSE_NATIVE=true` |
 | `mineru` | `<base>.mineru_raw/` | MinerU 服务返回的产物包 | `LIGHTRAG_FORCE_REPARSE_MINERU=true` |
 | `docling` | `<base>.docling_raw/` | docling-serve 返回的产物包 | `LIGHTRAG_FORCE_REPARSE_DOCLING=true` |
+| `image` | — | 无缓存——解析只是把文件复制进 sidecar 资源目录 | 不适用 |
 | `legacy` | — | 无缓存 | 不适用 |
 
 每个产物包都在 manifest 里记录引擎版本与生效参数签名，所以改服务端点、改抽取参数、或改 `MINERU_ENGINE_VERSION` / `DOCLING_ENGINE_VERSION` 本身就会让缓存失效。强制标志是为 manifest 察觉不到的那种情况准备的：**服务**变了而它的版本串没变。删除文档时勾选"同时删除文件"会把缓存目录连同 `.parsed/` 一并移除。
+
+### 3.8 使用 Image 文件解析引擎
+
+`image` 是内置引擎，处理**作为独立文档上传的一张位图**——区别于嵌在 docx / markdown 里的图片（后者随所属文档的引擎一起处理）。它完全在进程内运行：不依赖外部服务、不需要装 OCR、没有引擎参数、不留原始产物缓存。
+
+支持后缀：`png` / `jpg` / `jpeg` / `webp` / `gif`——与 VLM 分析阶段接受的位图格式完全一致（§4.3），这也是该集合不可扩展的原因：`bmp` / `tiff` 即使解析出 sidecar，分析阶段也会被跳过，最终什么都检索不到。这类文件应改路由到 `mineru` 或 `docling`。
+
+路由行为：
+
+- **裸上传自动路由到这里。** 这些后缀不在任何其它引擎的能力表里（`legacy` 没有、`native` 没有、通配规则也会被跳过），所以不做任何配置，把一个 `photo.png` 丢进去就会解析为 `image` 引擎并预选 `i` 选项（§2.7）。
+- **显式选择**与其它引擎一样：规则 `LIGHTRAG_PARSER=png:image`，或 hint `photo.[image].png`。
+- 指定了其它引擎的 hint 或规则优先于按后缀默认值，例如 `scan.[mineru-iteP].png` 会交给 MinerU 做 OCR。
+
+解析产物：一个只有 drawing 占位符的单块 `blocks.jsonl`（以文件名主体作为标题）、一个恰含一个 item 的 `drawings.json`、以及复制进 `<base>.blocks.assets/` 的原图（§6.2）。没有 `tables.json` / `equations.json`，也没有任何正文——所以只配分块选项（`R` / `F`…）时，该文档会以一份基本为空的文本文档入库。
+
+因此 VLM 分析不是可选的装饰，而是这个引擎存在的全部意义，其失败行为遵循 §4.3 的 fail-loud 约定：
+
+- **默认开启 `i` 且 VLM 不可用**（`VLM_PROCESS_ENABLE=false` 或没有具备视觉能力的 VLM 角色）时，文档进入 FAILED，`error_msg` 为"VLM analysis required but VLM role is not available"。配置好 VLM 角色（§4.6）后重试，或删除后重新上传。
+- **不想用 VLM 又要入库图片**：按文件关闭——`photo.[image-R].png`——或按规则关闭：`LIGHTRAG_PARSER=png:image-R,jpg:image-R,jpeg:image-R,webp:image-R,gif:image-R`。文档会正常走完流水线，但除文件名派生的标题外不贡献任何可检索内容。
+- **预过滤仍然生效**：宽或高小于 `VLM_MIN_IMAGE_PIXEL`（64）的图片记为 `skipped`，超过 `VLM_MAX_IMAGE_BYTES`（5 MB）的同样跳过——两种情况下文档本身保持健康，但同样检索不到内容。连图片头都无法解码的文件则在解析阶段直接失败。
 
 ## 4. 多模态分析（VLM）
 
@@ -1323,6 +1348,7 @@ per-file 个性化的典型场景：管理 UI 单独配置某个文件的 separa
 | legacy 引擎 | `PDF_DECRYPT_PASSWORD` | §3.2 |
 | native 引擎 | `NATIVE_MD_IMAGE_*` | §3.3 |
 | native docx smart_heading | `DOCX_SMART_HEADING`、`DOCX_SMART_*` 调优项 | §3.3 与 `env.example` 的 smart_heading 注释块 |
+| image 引擎 | —（不读任何专属环境变量） | §3.8 |
 | MinerU | `MINERU_*` | §3.4 |
 | Docling | `DOCLING_*` | §3.5 |
 | 解析缓存 | `LIGHTRAG_FORCE_REPARSE_{NATIVE,MINERU,DOCLING}`、`{MINERU,DOCLING}_ENGINE_VERSION` | §3.7、§6.3 |

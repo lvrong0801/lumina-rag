@@ -71,7 +71,7 @@ Each comma-separated item of `LIGHTRAG_PARSER` is one routing rule, matched agai
 └─ extension the rule applies to; `*` matches any
 ```
 
-So the first rule says "parse anything with `native`, analyze all three modalities, chunk with `P`", and the second says "anything the first rule cannot handle falls back to `legacy` with `R` chunking". A rule is skipped when the engine does not support that extension, or when an external engine has no endpoint configured — which is exactly how `*:native-iteP` ends up handling only `docx` / `md` / `textpack` while everything else drops through to `legacy`.
+So the first rule says "parse anything with `native`, analyze all three modalities, chunk with `P`", and the second says "anything the first rule cannot handle falls back to `legacy` with `R` chunking". A rule is skipped when the engine does not support that extension, or when an external engine has no endpoint configured — which is exactly how `*:native-iteP` ends up handling only `docx` / `md` / `textpack` while everything else drops through to `legacy`. Raster-image suffixes (`png` / `jpg` / `jpeg` / `webp` / `gif`) match **no** rule here — neither `native` nor `legacy` supports them — and land on the built-in `image` engine instead, via the per-suffix defaults in §2.7.
 
 The full grammar is in §2.3, the option letters in §2.1, and the engines in §3.
 
@@ -166,10 +166,11 @@ filename.[-OPTIONS].ext
   | --- | --- | --- |
   | `legacy` | plain-text extraction, no sidecars | you want the pre-upgrade behavior, or the document is plain text anyway |
   | `native` | built-in structured extractor, fully local, no external service | `docx` / `md` / `textpack`, and you want `P` chunking or modality analysis without deploying anything |
+  | `image` | built-in standalone-image extractor, fully local, no external service | a bare `png` / `jpg` / `jpeg` / `webp` / `gif` upload whose content should be searchable via VLM analysis |
   | `mineru` | external MinerU service | PDFs, scanned documents, and office / image formats that need layout and OCR |
   | `docling` | external docling-serve | an alternative to MinerU; the only built-in path to LaTeX equations |
 
-  Only `native`, `mineru` and `docling` write sidecars, so only they can serve the `i` / `t` / `e` options and the `P` chunker. Per-engine capabilities, configuration and deployment are in [§3](#3-file-parsing-engines).
+  Only `native`, `image`, `mineru` and `docling` write sidecars, so only they can serve the `i` / `t` / `e` options and the `P` chunker. Per-engine capabilities, configuration and deployment are in [§3](#3-file-parsing-engines).
 - `OPTIONS` is a string combination of processing options, e.g., `iet`, `R!`, `P`. The options are ultimately written into `process_options` and read by subsequent pipeline stages.
 - The hyphen in `ENGINE-OPTIONS` is only used to separate the engine from the options; it is not part of the options themselves.
 - When only processing options are specified, it must be written as `[-OPTIONS]`, e.g., `[-!]`. `[abc]` without a hyphen is strictly interpreted as an engine name and will raise an error; it will not fall back to being interpreted as options.
@@ -260,8 +261,9 @@ For Server deployments, `CUSTOM_CHUNKER=<registered-name>` (or `--custom-chunker
 - `LIGHTRAG_PARSER` is strictly validated at startup: unknown content extraction engines, malformed extension syntax, explicitly using an unsupported extension, external engines missing endpoint, and illegal characters in processing options all cause startup to fail.
 - **When a wildcard rule matches a certain extension**, the engine must pass two usability checks (see `parser_routing._engine_is_usable`): (a) the engine's capability table supports that extension; (b) if it is an external engine (`mineru` / `docling`), the corresponding endpoint/token environment variable is configured. If either check fails, the rule is skipped and the next rule is matched. For example, in `*:mineru;html:docling`: MinerU does not support the `html` extension (condition a fails), so `html` continues to match `docling`; if `MINERU_API_MODE=local` but `MINERU_LOCAL_ENDPOINT` is not set, all PDFs also skip `*:mineru` and fall to the next rule (condition b fails). This behavior applies to both `LIGHTRAG_PARSER` rule matching and filename hint engine selection.
 - Filename hints have higher priority than `LIGHTRAG_PARSER`. If the engine specified in a hint does not support that extension, the system falls back to the default rules to continue selecting an available engine.
-- If the filename hint provides a non-empty options string, the hint takes precedence; otherwise the default options of the matching item in `LIGHTRAG_PARSER` are used; if neither is provided, all defaults are used.
-- If no rule is available, the file content extraction falls back to `legacy`; if `legacy` also does not support the file extension, an error entry is added to the system and the uploaded file remains in the `INPUT` directory.
+- If the filename hint provides a non-empty options string, the hint takes precedence; otherwise the default options of the matching item in `LIGHTRAG_PARSER` are used; if neither is provided, the per-suffix defaults are used (raster-image suffixes default to `i`; other extensions have no default options).
+- Two extensions have a built-in default engine that applies when neither a hint nor a `LIGHTRAG_PARSER` rule matched: `.textpack` routes to `native`, and the raster-image suffixes `png` / `jpg` / `jpeg` / `webp` / `gif` route to `image` with the `i` option preselected (so an uploaded image is analyzed by the VLM by default — with `VLM_PROCESS_ENABLE=false` such a document **fails loudly** at the analyze stage; see §3.8 for the VLM-free opt-out).
+- If no rule, hint, or per-suffix default is available, the file content extraction falls back to `legacy`; if `legacy` also does not support the file extension, an error entry is added to the system and the uploaded file remains in the `INPUT` directory.
 - At most one of F/R/V/P/C may appear; repeating the same option has effect only once but does not raise an error.
 - Case-sensitive: the chunking options F/R/V/P/C must be uppercase; other options i/t/e must be lowercase.
 - If illegal characters appear inside the square brackets, the entire hint is invalidated, the engine follows the default rules, and the options fall back to `LIGHTRAG_PARSER` defaults or all defaults; a warning is also logged.
@@ -276,6 +278,7 @@ For Server deployments, `CUSTOM_CHUNKER=<registered-name>` (or `--custom-chunker
 | --- | --- | --- |
 | `legacy` | Legacy extraction; content is centrally extracted before joining the pipeline | `txt` `md` `mdx` `pdf` `docx` `pptx` `xlsx` `rtf` `odt` `tex` `epub` `html` `htm` `csv` `json` `xml` `yaml` `yml` `log` `conf` `ini` `properties` `sql` `bat` `sh` `c` `h` `cpp` `hpp` `py` `java` `js` `ts` `swift` `go` `rb` `php` `css` `scss` `less` |
 | `native` | Built-in intelligent structured content extractor | `docx` `md` `textpack` |
+| `image` | Built-in standalone-image extractor; turns one uploaded raster image into a one-drawing sidecar for VLM analysis | `png` `jpg` `jpeg` `webp` `gif` |
 | `mineru` | External MinerU content extraction engine | `pdf` `docx` `pptx` `xlsx` `png` `jpg` `jpeg` `jp2` `webp` `gif` `bmp` (extensible, see `MINERU_ADDITIONAL_SUFFIXES`) |
 | `docling` | External Docling content extraction engine | `pdf` `docx` `pptx` `xlsx` `md` `html` `xhtml` `png` `jpg` `jpeg` `tiff` `webp` `bmp` (extensible, see `DOCLING_ADDITIONAL_SUFFIXES`) |
 
@@ -287,7 +290,7 @@ LightRAG caches the parsing results of the `mineru` and `docling` engines locall
 
 ### 3.2 Using the legacy Content Extractor
 
-`legacy` is the fallback engine for every extension except `.textpack`, which the routing layer always sends to `native`. It is also what you get with `LIGHTRAG_PARSER` unset. It extracts plain text only, which has four consequences worth knowing before you route anything to it:
+`legacy` is the fallback engine for every extension except the two with per-suffix defaults — `.textpack`, which the routing layer always sends to `native`, and the raster-image suffixes (`png` / `jpg` / `jpeg` / `webp` / `gif`), which default to `image` (§3.8). It is also what you get with `LIGHTRAG_PARSER` unset. It extracts plain text only, which has four consequences worth knowing before you route anything to it:
 
 - **It never writes sidecars.** Its output is `parse_format=raw`, so there is no `drawings.json` / `tables.json` / `equations.json` for the analyze stage to read. The `i` / `t` / `e` options therefore do nothing on a legacy-parsed document, and `P` degrades to `R` because there is no heading structure to split on (§2.7).
 - **It has no raw cache directory**, so `LIGHTRAG_FORCE_REPARSE_*` does not apply to it (§3.7).
@@ -302,6 +305,7 @@ Supported extensions: `docx` / `md` / `textpack`. How to enable:
 
 - `docx` and `md` still default to `legacy`; select native explicitly, e.g. a default rule `LIGHTRAG_PARSER=docx:native` / `LIGHTRAG_PARSER=md:native`, or a filename hint `report.[native-iet].docx` / `notes.[native].md` (syntax in [§2.4](#24-default-rules-lightrag_parser) / [§2.5](#25-single-file-override-filename-hints)).
 - `textpack` is a native-exclusive extension and is routed to native automatically without a hint/rule.
+- Raster images (`png` / `jpg` / `jpeg` / `webp` / `gif`) are served by the separate `image` engine (§3.8), not by `native`; a wildcard or hinted `native` rule never matches them.
 
 #### docx Extraction Capabilities
 
@@ -509,9 +513,30 @@ The `native`, `mineru` and `docling` engines each keep a raw-artifact cache next
 | `native` | `<base>.native_raw/` | external images downloaded by the markdown / textpack path | `LIGHTRAG_FORCE_REPARSE_NATIVE=true` |
 | `mineru` | `<base>.mineru_raw/` | the artifact bundle returned by the MinerU service | `LIGHTRAG_FORCE_REPARSE_MINERU=true` |
 | `docling` | `<base>.docling_raw/` | the artifact bundle returned by docling-serve | `LIGHTRAG_FORCE_REPARSE_DOCLING=true` |
+| `image` | — | no cache — parsing is just copying the file into the sidecar assets | not applicable |
 | `legacy` | — | no cache | not applicable |
 
 Each bundle records the engine version and the effective parameter signature in its manifest, so changing the endpoint, an extraction parameter, or `MINERU_ENGINE_VERSION` / `DOCLING_ENGINE_VERSION` invalidates the cache on its own. The force flags exist for the case the manifest cannot detect: the *service* changed while its version string did not. Deleting a document with "also delete file" removes the cache directory along with `.parsed/`.
+
+### 3.8 Using the Image File Parsing Engine
+
+`image` is the built-in engine for a standalone raster image uploaded as a document in its own right — as opposed to an image embedded in a docx / markdown file, which rides along with that document's engine. It runs fully in-process: no external service, no OCR install, no engine parameters, no raw-artifact cache.
+
+Supported extensions: `png` / `jpg` / `jpeg` / `webp` / `gif` — exactly the raster formats the VLM analysis stage accepts (§4.3), which is also why the set cannot be extended: parsing a `bmp` / `tiff` would produce a sidecar whose analysis is then skipped, leaving a searchable nothing. Route such files to `mineru` or `docling` instead.
+
+How routing treats it:
+
+- **Bare uploads route here automatically.** These suffixes match no other engine's capability table (`legacy` does not list them, `native` does not, the wildcard rules skip them), so without any configuration a dropped-in `photo.png` resolves to `image` with the `i` option preselected (§2.7).
+- **Explicit selection** works like any other engine: a rule `LIGHTRAG_PARSER=png:image,photo.jpg:image` — or simply a hint `photo.[image].png`.
+- A hint or rule that names a different engine wins over the per-suffix default, e.g. `scan.[mineru-iteP].png` to OCR the image through MinerU.
+
+What a parse produces: a one-block `blocks.jsonl` whose only content is a drawing placeholder under the file stem as heading, a `drawings.json` with exactly one item, and the original file copied into `<base>.blocks.assets/` (§6.2). There is no `tables.json` / `equations.json` and no body text — so with chunking options alone (`R` / `F`…) the document ingests as an essentially empty text document.
+
+VLM analysis is therefore not optional decoration but the entire point of the engine, and the failure modes follow the fail-loud contract of §4.3:
+
+- **With `i` on (the default) and VLM unavailable** (`VLM_PROCESS_ENABLE=false` or no vision-capable VLM role), the document lands in FAILED with "VLM analysis required but VLM role is not available". Configure the VLM role (§4.6) and retry, or delete and re-upload the file.
+- **To ingest images without VLM**, opt out per file — `photo.[image-R].png` — or by rule: `LIGHTRAG_PARSER=png:image-R,jpg:image-R,jpeg:image-R,webp:image-R,gif:image-R`. The document then processes normally but contributes no searchable content beyond its filename-derived heading.
+- **Pre-filters still apply**: an image whose width or height is below `VLM_MIN_IMAGE_PIXEL` (64) is marked `skipped`, and one over `VLM_MAX_IMAGE_BYTES` (5 MB) is skipped too — in both cases the document itself stays healthy, again with nothing searchable. An image header that cannot be decoded at all fails at parse time instead.
 
 ## 4. Multimodal Analysis (VLM)
 
@@ -1323,6 +1348,7 @@ Where to find each family of file-processing variables. This is an index, not a 
 | legacy engine | `PDF_DECRYPT_PASSWORD` | §3.2 |
 | native engine | `NATIVE_MD_IMAGE_*` | §3.3 |
 | native docx smart_heading | `DOCX_SMART_HEADING`, `DOCX_SMART_*` tuning | §3.3 and the smart_heading block of `env.example` |
+| image engine | — (reads no env var of its own) | §3.8 |
 | MinerU | `MINERU_*` | §3.4 |
 | Docling | `DOCLING_*` | §3.5 |
 | Parse cache | `LIGHTRAG_FORCE_REPARSE_{NATIVE,MINERU,DOCLING}`, `{MINERU,DOCLING}_ENGINE_VERSION` | §3.7, §6.3 |

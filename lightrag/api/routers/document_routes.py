@@ -3,6 +3,7 @@ This module contains all document-related routes for the LightRAG API.
 """
 
 import asyncio
+import inspect
 import base64
 import binascii
 import errno
@@ -24,6 +25,7 @@ from lightrag.utils import (
     validate_workspace,
     _consume_future_exception,
     _wait_deferring_cancellation,
+    canonical_workspace_name,
 )
 import aiofiles
 import traceback
@@ -44,6 +46,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     Request,
@@ -123,7 +126,7 @@ from lightrag.utils import (
 from lightrag.kg.shared_storage import append_pipeline_history
 from lightrag.utils_pipeline import count_active_documents, read_source_file_basename
 from lightrag.api.admission import adopt_admission_ticket
-from lightrag.api.utils_api import get_combined_auth_dependency
+from lightrag.api.utils_api import get_combined_auth_dependency, authorize
 from ..config import global_args
 
 
@@ -1073,6 +1076,17 @@ class DeleteDocRequest(BaseModel):
         default=False,
         description="Whether to delete cached LLM extraction results for the documents.",
     )
+    purge: bool = Field(
+        default=False,
+        description=(
+            "When False (default) documents are SOFT-deleted: their doc_status row "
+            "flips to ``deleted`` with ``deleted_at``/``deleted_by``/``original_status`` "
+            "recorded in metadata, while vectors / graph / KV data / files are kept. "
+            "The row reappears in the recycle bin and can be restored. When True the "
+            "documents are PHYSICALLY deleted (all associated data) via the background "
+            "destructive slot — irreversible."
+        ),
+    )
 
     @field_validator("doc_ids", mode="after")
     @classmethod
@@ -1091,6 +1105,61 @@ class DeleteDocRequest(BaseModel):
             raise ValueError("Document IDs must be unique")
 
         return validated_ids
+
+
+def _validate_doc_ids_after(doc_ids: List[str]) -> List[str]:
+    """Shared doc_ids validator (empty/blank/duplicate rejection)."""
+    if not doc_ids:
+        raise ValueError("Document IDs list cannot be empty")
+    validated_ids = []
+    for doc_id in doc_ids:
+        if not doc_id or not doc_id.strip():
+            raise ValueError("Document ID cannot be empty")
+        validated_ids.append(doc_id.strip())
+    if len(validated_ids) != len(set(validated_ids)):
+        raise ValueError("Document IDs must be unique")
+    return validated_ids
+
+
+class RestoreDocsRequest(BaseModel):
+    doc_ids: List[str] = Field(
+        ..., description="The IDs of the documents to restore from the recycle bin."
+    )
+
+    @field_validator("doc_ids", mode="after")
+    @classmethod
+    def validate_doc_ids(cls, doc_ids: List[str]) -> List[str]:
+        return _validate_doc_ids_after(doc_ids)
+
+
+class PurgeDocsRequest(BaseModel):
+    doc_ids: List[str] = Field(
+        ...,
+        description="The IDs of the documents to permanently purge (physical delete).",
+    )
+    delete_file: bool = Field(
+        default=False,
+        description="Whether to delete the corresponding file in the upload directory.",
+    )
+    delete_llm_cache: bool = Field(
+        default=False,
+        description="Whether to delete cached LLM extraction results for the documents.",
+    )
+
+    @field_validator("doc_ids", mode="after")
+    @classmethod
+    def validate_doc_ids(cls, doc_ids: List[str]) -> List[str]:
+        return _validate_doc_ids_after(doc_ids)
+
+
+class RestoreDocsResponse(BaseModel):
+    restored_docs: List[str] = Field(
+        description="Document IDs successfully restored to their previous status."
+    )
+    failed_docs: List[str] = Field(
+        description="Document IDs that could not be restored (missing or not deleted)."
+    )
+    message: str = Field(description="Message describing the operation result")
 
 
 # doc_status.metadata keys that are internal pipeline bookkeeping and must
@@ -1228,6 +1297,10 @@ class DocumentsRequest(BaseModel):
         default="desc", description="Sort direction"
     )
 
+    category: Optional[str] = Field(
+        default=None,
+        description="Filter by document category. Empty string for uncategorized, None for all.",
+    )
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
@@ -1445,10 +1518,23 @@ class DocumentManager:
 
         # Create workspace-specific input directory
         # If workspace is provided, create a subdirectory for data isolation
-        if workspace:
-            self.input_dir = self.base_input_dir / workspace
-        else:
+        #
+        # Avoid double-nesting: if the base input_dir already embeds the
+        # workspace (server-provided input dirs already include the
+        # workspace naming piece, see workspace_manager._input_dir), do not
+        # append the workspace again. We compare the LAST path segment with
+        # the canonicalized workspace name so a hyphenated name collapses
+        # naturally (e.g. `token-factory` and `token_factory` hit the same
+        # `docs.input_dir`).
+        workspace_clean = canonical_workspace_name(workspace)
+        if workspace_clean and self.base_input_dir.name == workspace_clean:
+            # The base input dir already ends with the workspace name (e.g.
+            # `.../rag_storage/token_factory`), so don't append the workspace
+            # name again. This prevents two-level nesting like
+            # `.../token_factory/token_factory`.
             self.input_dir = self.base_input_dir
+        else:
+            self.input_dir = self.base_input_dir / workspace_clean
 
         # Create input directory if it doesn't exist
         self.input_dir.mkdir(parents=True, exist_ok=True)
@@ -2363,6 +2449,8 @@ async def pipeline_enqueue_file(
     from_scan: bool = False,
     admission_token: str | None = None,
     known_file_size: int | None = None,
+    owner: str | None = None,
+    doc_status_extra: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Add a file to the queue for processing
 
@@ -2382,6 +2470,10 @@ async def pipeline_enqueue_file(
             candidate spool recorded at discovery time; it feeds error reports
             only, so a size that went stale between discovery and enqueue costs
             nothing.
+        owner: the uploading account's username, recorded as
+            ``metadata.owner`` on the doc_status row (owner-isolation
+            reference filtering).  ``None`` (scan / SDK path) marks the
+            document as shared: it inherits the workspace's grants.
     Returns:
         tuple: (success: bool, track_id: str)
     """
@@ -2494,6 +2586,11 @@ async def pipeline_enqueue_file(
                 "process_options": api_process_options,
                 "from_scan": from_scan,
             }
+            extra = dict(doc_status_extra or {})
+            if owner is not None:
+                extra["owner"] = owner
+            if extra:
+                enqueue_kwargs["doc_status_extra"] = extra
             if admission_token is not None:
                 # Only sent when the caller actually holds a reservation; None
                 # is the enqueue's own default and adding it would be noise.
@@ -2561,6 +2658,8 @@ async def pipeline_index_file(
     file_path: Path,
     track_id: str = None,
     admission_token: str | None = None,
+    owner: str | None = None,
+    doc_status_extra: dict[str, Any] | None = None,
 ):
     """Index a file with track_id
 
@@ -2573,10 +2672,17 @@ async def pipeline_index_file(
             instead of counting this request twice (LR2 §9.2). Released here,
             between enqueue and processing — see
             :func:`_release_admission_after_enqueue`.
+        owner: uploading account username for ``metadata.owner`` (see
+            :func:`pipeline_enqueue_file`).
     """
     try:
         success, _ = await pipeline_enqueue_file(
-            rag, file_path, track_id, admission_token=admission_token
+            rag,
+            file_path,
+            track_id,
+            admission_token=admission_token,
+            owner=owner,
+            doc_status_extra=doc_status_extra,
         )
         # The enqueue is over (its writes and, on failure, its error-document
         # writes are all behind us), so the reservation has nothing left to
@@ -2807,6 +2913,7 @@ async def pipeline_index_texts(
     chunking: Optional[TextChunkingConfig] = None,
     resolved_chunking: Optional[tuple[str, dict]] = None,
     admission_token: str | None = None,
+    owner: str | None = None,
 ):
     """Index a list of texts with track_id
 
@@ -2849,6 +2956,8 @@ async def pipeline_index_texts(
         "process_options": process_options,
         "chunk_options": chunk_options,
     }
+    if owner is not None:
+        enqueue_kwargs["doc_status_extra"] = {"owner": owner}
     if admission_token is not None:
         # See pipeline_enqueue_file: only forwarded when a reservation exists.
         enqueue_kwargs["admission_token"] = admission_token
@@ -4147,6 +4256,48 @@ async def run_scanning_process(
         reporter.finish(job_status, job_message)
 
 
+async def _soft_delete_documents(
+    rag: LightRAG, doc_ids: list[str], http_request: Request | None = None
+) -> None:
+    """Flip doc_status rows to ``DELETED``, recording soft-delete metadata.
+
+    Vectors / graph / KV data / files are KEPT so the row can be restored;
+    schedulers never read DELETED rows (their status lists exclude it) and
+    live listings / counts exclude it by default, so the row surfaces only
+    in the recycle bin until ``restore`` or ``purge``.
+
+    Idempotent: a row already in ``deleted`` is left untouched (its
+    ``deleted_at`` timestamp is preserved). Missing rows are logged and
+    skipped — best-effort, never raised into the endpoint.
+    """
+    account = getattr(http_request, "state", None)
+    account = getattr(account, "account", None) if account is not None else None
+    username = (account or {}).get("username") or "unknown"
+    now = datetime.now().isoformat()
+    for doc_id in doc_ids:
+        row = await rag.doc_status.get_by_id(doc_id)
+        if row is None:
+            logger.warning(
+                f"[{rag.workspace}] soft-delete skipped: doc_status row "
+                f"'{doc_id}' not found"
+            )
+            continue
+        current_status = row.get("status")
+        if current_status == "deleted":
+            continue
+        if isinstance(current_status, DocStatus):
+            current_status = current_status.value
+        metadata = dict(row.get("metadata") or {})
+        metadata["deleted_at"] = now
+        metadata["deleted_by"] = username
+        metadata["original_status"] = str(current_status)
+        await rag.doc_status.update_doc_status_fields(
+            doc_id,
+            {"status": DocStatus.DELETED, "metadata": metadata},
+            missing_ok=True,
+        )
+
+
 async def background_delete_documents(
     rag: LightRAG,
     doc_manager: DocumentManager,
@@ -4495,8 +4646,22 @@ async def background_delete_documents(
 
 
 def create_document_routes(
-    rag: LightRAG, doc_manager: DocumentManager, api_key: Optional[str] = None
+    get_rag_dependency, get_doc_manager_dependency, api_key: Optional[str] = None
 ):
+    # Backward compatibility: pre-workspace callers pass ready LightRAG /
+    # DocumentManager instances, the enterprise wiring passes per-request
+    # factory callables. Non-factories are wrapped in zero-arg factories so
+    # the Depends injection below yields the same object every request.
+    # Note: a LightRAG instance IS callable, so "not callable" would be the
+    # wrong test — only true functions/methods are treated as factories.
+    if not (
+        inspect.isfunction(get_rag_dependency)
+        or inspect.ismethod(get_rag_dependency)
+        or inspect.isclass(get_rag_dependency)
+    ):
+        _rag, _doc_manager = get_rag_dependency, get_doc_manager_dependency
+        get_rag_dependency = lambda: _rag
+        get_doc_manager_dependency = lambda: _doc_manager
     # Fresh router per call — see the note above the temp_prefix constant.
     router = APIRouter(
         prefix="/documents",
@@ -4505,12 +4670,65 @@ def create_document_routes(
 
     # Create combined auth dependency for document routes
     combined_auth = get_combined_auth_dependency(api_key)
+    authorize_read = authorize("read")
+    authorize_write = authorize("write")
+
+    async def _ensure_dep(val, factory):
+        # Direct (non-FastAPI) invocation leaves the raw Depends marker
+        # object; resolve it through the factory. The object-compat
+        # lambda takes no arguments, which is exactly the direct-call case.
+        from fastapi.params import Depends as _Marker
+        if isinstance(val, _Marker):
+            resolved = factory()
+            if inspect.isawaitable(resolved):
+                return await resolved
+            return resolved
+        return val
+
+    async def _ensure_managed_tasks(val):
+        # Direct invocation has no Request to build the real managed-task
+        # set, so provide the empty container.
+        from fastapi.params import Depends as _Marker
+        if isinstance(val, _Marker):
+            return set()
+        return val
+
+    async def _audit_request(
+        http_request: Request,
+        action: str,
+        resource_type: str,
+        resource_id: Optional[str] = None,
+        detail: Optional[dict] = None,
+    ) -> None:
+        """Best-effort change-operation audit; never raises into the endpoint."""
+        # Root app resolved via request.app; tests invoke endpoints with
+        # SimpleNamespace stand-ins that have no .app, so tolerate that.
+        root_app = getattr(http_request, "app", None)
+        audit_logger = getattr(getattr(root_app, "state", None), "audit_logger", None)
+        if audit_logger is None or not audit_logger.enabled:
+            return
+        account = getattr(http_request.state, "account", None) or {}
+        client = http_request.client
+        await audit_logger.record(
+            action=action,
+            username=account.get("username"),
+            role=account.get("role"),
+            workspace=http_request.headers.get("LIGHTRAG-WORKSPACE", "") or None,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            ip=client.host if client else None,
+            user_agent=http_request.headers.get("user-agent"),
+            detail=detail,
+        )
 
     @router.post(
-        "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth)]
+        "/scan", response_model=ScanResponse, dependencies=[Depends(combined_auth), Depends(authorize_write)]
     )
     async def scan_for_new_documents(
         managed_tasks: set = Depends(get_managed_background_tasks),
+    http_request: Request = None,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         Trigger the scanning process for new documents.
@@ -4564,6 +4782,18 @@ def create_document_routes(
                 (all records are valid RUNNING jobs), 409 on a track-id
                 collision, 503 when the job store is unavailable.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        managed_tasks = await _ensure_managed_tasks(managed_tasks)
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_scan",
+                "workspace",
+                None,
+                None,
+            )
+
         from lightrag.exceptions import PipelineNotInitializedError
         from lightrag.kg.pipeline_ingress import (
             ManualRetryPublishResult,
@@ -4878,9 +5108,11 @@ def create_document_routes(
     @router.get(
         "/scan/status/{track_id}",
         response_model=ScanJobStatusResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
     )
-    async def get_scan_job_status(track_id: str):
+    async def get_scan_job_status(
+    track_id: str, rag=Depends(get_rag_dependency), doc_manager=Depends(get_doc_manager_dependency)
+    ):
         """
         Report the bounded status of one scan job (LR2 §8.6).
 
@@ -4899,6 +5131,9 @@ def create_document_routes(
             HTTPException: 404 when no job record exists for ``track_id``; 503
                 when the job store is unavailable.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         store = _resolve_scan_job_store(rag)
         if store is None:
             raise HTTPException(
@@ -4920,7 +5155,7 @@ def create_document_routes(
     @router.get(
         "/source_conflicts",
         response_model=SourceConflictListResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
     )
     async def list_source_conflicts(
         limit: int = Query(
@@ -4932,6 +5167,8 @@ def create_document_routes(
         cursor: Optional[str] = Query(
             None, description="next_cursor from a previous page (opaque)"
         ),
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         List canonical source keys claimed by more than one primary document.
@@ -4953,6 +5190,9 @@ def create_document_routes(
                 resolution); 503 when the storage control plane is unavailable
                 (e.g. a derived index still rebuilding).
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         position = _decode_source_conflict_cursor(cursor)
         try:
             page = await rag.doc_status.list_source_conflicts_page(
@@ -4995,11 +5235,13 @@ def create_document_routes(
     @router.post(
         "/source_conflicts/repair",
         response_model=SourceConflictRepairResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
     )
     async def repair_source_conflict(
         payload: SourceConflictRepairRequest,
         http_request: Request,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         Settle one source conflict by naming the document that keeps the source.
@@ -5041,6 +5283,9 @@ def create_document_routes(
                 cannot repair conflicts; 503 when storage is unavailable; 422
                 when a commit omits the CAS tokens.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         actor = http_request.client.host if http_request.client else "unknown"
         audit_key = safe_log_value(payload.canonical_source_key)
         audit_primary = safe_log_value(payload.primary_doc_id)
@@ -5222,12 +5467,16 @@ def create_document_routes(
         )
 
     @router.post(
-        "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
+        "/upload", response_model=InsertResponse, dependencies=[Depends(combined_auth), Depends(authorize_write)]
     )
     async def upload_to_input_dir(
         managed_tasks: set = Depends(get_managed_background_tasks),
         file: UploadFile = File(...),
+        mode: str = Form("new"),
+        target_doc_ids: list[str] | None = Form(None),
         http_request: Request = None,
+        rag=Depends(get_rag_dependency),
+        doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         Upload a file to the input directory and index it.
@@ -5305,6 +5554,100 @@ def create_document_routes(
                 chunking configuration (an explicit ``C`` selector without a
                 custom ``LightRAG.chunking_func``), 500 other errors.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        managed_tasks = await _ensure_managed_tasks(managed_tasks)
+        # Owner isolation: record the uploading account as metadata.owner so
+        # query-time reference filtering can hide the document from non-owners
+        # (admin / workspace-admin grants still see it).
+        _uploader_account = getattr(http_request, "state", None)
+        _uploader_account = (
+            getattr(_uploader_account, "account", None)
+            if _uploader_account is not None
+            else None
+        )
+        upload_owner = (_uploader_account or {}).get("username") or None
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_upload",
+                "document",
+                file.filename,
+                {"filename": file.filename},
+            )
+
+        # Upload mode: new (default) / overwrite / incremental.
+        mode = (mode or "new").strip().lower()
+        if mode not in ("new", "overwrite", "incremental"):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid upload mode '{mode}'. "
+                    "Expected one of: new, overwrite, incremental."
+                ),
+            )
+        doc_status_extra: dict[str, Any] | None = None
+        if mode in ("overwrite", "incremental"):
+            target_doc_ids = [
+                t.strip() for t in (target_doc_ids or []) if t and t.strip()
+            ]
+            if not target_doc_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"target_doc_ids is required for mode '{mode}'.",
+                )
+            seen: set[str] = set()
+            unique_ids: list[str] = []
+            for tid in target_doc_ids:
+                if tid not in seen:
+                    seen.add(tid)
+                    unique_ids.append(tid)
+            target_doc_ids = unique_ids
+
+            target_statuses: dict[str, dict] = {}
+            for tid in target_doc_ids:
+                status = await rag.doc_status.get_by_id(tid)
+                if not status:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Target document '{tid}' not found.",
+                    )
+                target_statuses[tid] = status
+
+        if mode == "overwrite":
+            # Delete every selected target document (record + chunks + graph +
+            # vectors) synchronously, then remove its physical source file(s).
+            for tid in target_doc_ids:
+                result = await rag.adelete_by_doc_id(tid)
+                if result.status != "success":
+                    raise HTTPException(
+                        status_code=result.status_code or 500,
+                        detail=result.message,
+                    )
+                if http_request is not None:
+                    await _audit_request(
+                        http_request,
+                        "document_delete",
+                        "document",
+                        tid,
+                        {"via": "overwrite"},
+                    )
+                old_file_path = target_statuses[tid].get("file_path")
+                if old_file_path and old_file_path != UNKNOWN_FILE_SOURCE:
+                    try:
+                        delete_file_variants_by_file_path(
+                            doc_manager.input_dir, old_file_path
+                        )
+                    except Exception as exc:  # best-effort physical cleanup
+                        logger.warning(
+                            "Failed to delete old source file for %s: %s",
+                            tid,
+                            exc,
+                        )
+            doc_status_extra = {"overwrote": target_doc_ids}
+        elif mode == "incremental":
+            doc_status_extra = {"incremental_of": target_doc_ids}
+
         from lightrag.kg.shared_storage import start_reserved_background_task
 
         enqueue_token, admission_adopted = _adopt_or_new_enqueue_token(http_request)
@@ -5520,6 +5863,8 @@ def create_document_routes(
                         file_path,
                         track_id,
                         admission_token=enqueue_token,
+                        owner=upload_owner,
+                        doc_status_extra=doc_status_extra,
                     )
                 finally:
                     await _release_enqueue_slot(rag, enqueue_token)
@@ -5558,12 +5903,14 @@ def create_document_routes(
                 await _release_enqueue_slot(rag, enqueue_token)
 
     @router.post(
-        "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth)]
+        "/text", response_model=InsertResponse, dependencies=[Depends(combined_auth), Depends(authorize_write)]
     )
     async def insert_text(
         request: InsertTextRequest,
         managed_tasks: set = Depends(get_managed_background_tasks),
         http_request: Request = None,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         Insert text into the RAG system.
@@ -5593,6 +5940,26 @@ def create_document_routes(
             HTTPException: 400 invalid file_source, 409 same-name conflict
                 or scan/destructive job in flight, 500 other errors.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        managed_tasks = await _ensure_managed_tasks(managed_tasks)
+        # Owner isolation (see upload_to_input_dir).
+        _uploader_account = getattr(http_request, "state", None)
+        _uploader_account = (
+            getattr(_uploader_account, "account", None)
+            if _uploader_account is not None
+            else None
+        )
+        text_owner = (_uploader_account or {}).get("username") or None
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_upload",
+                "document",
+                None,
+                {"kind": "text"},
+            )
+
         from lightrag.kg.shared_storage import start_reserved_background_task
 
         enqueue_token, admission_adopted = _adopt_or_new_enqueue_token(http_request)
@@ -5658,6 +6025,7 @@ def create_document_routes(
                         chunking=request.chunking,
                         resolved_chunking=resolved_chunking,
                         admission_token=enqueue_token,
+                        owner=text_owner,
                     )
                 finally:
                     await _release_enqueue_slot(rag, enqueue_token)
@@ -5690,12 +6058,14 @@ def create_document_routes(
     @router.post(
         "/texts",
         response_model=InsertResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
     )
     async def insert_texts(
         request: InsertTextsRequest,
         managed_tasks: set = Depends(get_managed_background_tasks),
         http_request: Request = None,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         Insert multiple texts into the RAG system.
@@ -5726,6 +6096,26 @@ def create_document_routes(
                 conflict or scan/destructive job in flight, 413 more texts
                 than ``MAX_TEXTS_PER_REQUEST`` allows, 500 other errors.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        managed_tasks = await _ensure_managed_tasks(managed_tasks)
+        # Owner isolation (see upload_to_input_dir).
+        _uploader_account = getattr(http_request, "state", None)
+        _uploader_account = (
+            getattr(_uploader_account, "account", None)
+            if _uploader_account is not None
+            else None
+        )
+        texts_owner = (_uploader_account or {}).get("username") or None
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_upload",
+                "document",
+                None,
+                {"kind": "texts", "count": len(request.texts)},
+            )
+
         from lightrag.kg.shared_storage import start_reserved_background_task
 
         enqueue_token, admission_adopted = _adopt_or_new_enqueue_token(http_request)
@@ -5822,6 +6212,7 @@ def create_document_routes(
                         chunking=request.chunking,
                         resolved_chunking=resolved_chunking,
                         admission_token=enqueue_token,
+                        owner=texts_owner,
                     )
                 finally:
                     await _release_enqueue_slot(rag, enqueue_token)
@@ -5852,7 +6243,7 @@ def create_document_routes(
                 await _release_enqueue_slot(rag, enqueue_token)
 
     @router.delete(
-        "", response_model=ClearDocumentsResponse, dependencies=[Depends(combined_auth)]
+        "", response_model=ClearDocumentsResponse, dependencies=[Depends(combined_auth), Depends(authorize_write)]
     )
     async def clear_documents(
         delete_parsed_files: Annotated[
@@ -5878,6 +6269,9 @@ def create_document_routes(
                 )
             ),
         ] = False,
+    http_request: Request = None,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         Clear all documents from the RAG system.
@@ -5939,6 +6333,17 @@ def create_document_routes(
             HTTPException: Raised when a serious error occurs during the clearing process,
                           with status code 500 and error details in the detail field.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_delete",
+                "workspace",
+                None,
+                {"op": "clear", "delete_parsed_files": delete_parsed_files},
+            )
+
         from lightrag.kg.shared_storage import (
             get_namespace_data,
             get_namespace_lock,
@@ -6375,10 +6780,12 @@ def create_document_routes(
 
     @router.get(
         "/pipeline_status",
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
         response_model=PipelineStatusResponse,
     )
-    async def get_pipeline_status() -> PipelineStatusResponse:
+    async def get_pipeline_status(
+    rag=Depends(get_rag_dependency), doc_manager=Depends(get_doc_manager_dependency)
+    ) -> PipelineStatusResponse:
         """
         Get the current status of the document indexing pipeline.
 
@@ -6400,6 +6807,9 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving pipeline status (500)
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         try:
             from lightrag.kg.shared_storage import (
                 get_namespace_data,
@@ -6488,7 +6898,7 @@ def create_document_routes(
     class DeleteDocByIdResponse(BaseModel):
         """Response model for single document deletion operation."""
 
-        status: Literal["deletion_started", "busy", "not_allowed"] = Field(
+        status: Literal["deletion_started", "soft_deleted", "busy", "not_allowed"] = Field(
             description="Status of the deletion operation"
         )
         message: str = Field(description="Message describing the operation result")
@@ -6497,12 +6907,15 @@ def create_document_routes(
     @router.delete(
         "/delete_document",
         response_model=DeleteDocByIdResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
         summary="Delete a document and all its associated data by its ID.",
     )
     async def delete_document(
         delete_request: DeleteDocRequest,
         managed_tasks: set = Depends(get_managed_background_tasks),
+    http_request: Request = None,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ) -> DeleteDocByIdResponse:
         """
         Delete documents and all their associated data by their IDs using background processing.
@@ -6539,9 +6952,37 @@ def create_document_routes(
             HTTPException:
               - 500: If an unexpected internal error occurs during initialization.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        managed_tasks = await _ensure_managed_tasks(managed_tasks)
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_delete",
+                "document",
+                None,
+                {"doc_ids": delete_request.doc_ids},
+            )
+
         from lightrag.kg.shared_storage import start_reserved_background_task
 
         doc_ids = delete_request.doc_ids
+
+        # Soft delete (default): flip doc_status rows to DELETED, keep all
+        # associated data. No destructive slot is needed — nothing is removed
+        # and scheduling never reads DELETED rows. Purge (purge=True) keeps
+        # the physical-delete path below.
+        if not delete_request.purge:
+            await _soft_delete_documents(rag, doc_ids, http_request)
+            return DeleteDocByIdResponse(
+                status="soft_deleted",
+                message=(
+                    f"Moved {len(doc_ids)} document(s) to the recycle bin. "
+                    "Use POST /documents/restore to bring them back, or "
+                    "DELETE /documents/purge to permanently remove them."
+                ),
+                doc_id=", ".join(doc_ids),
+            )
 
         # Owner token for the destructive slot, generated before any await so the
         # finally can release it by owner even if the acquire is cancelled.
@@ -6622,11 +7063,235 @@ def create_document_routes(
                 await _release_destructive_busy(rag, destructive_token)
 
     @router.get(
+        "/recycle_bin",
+        response_model=PaginatedDocsResponse,
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
+    )
+    async def get_recycle_bin(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=10, le=200),
+        sort_field: str = Query("updated_at"),
+        sort_direction: str = Query("desc"),
+        rag=Depends(get_rag_dependency),
+        doc_manager=Depends(get_doc_manager_dependency),
+    ) -> PaginatedDocsResponse:
+        """List recycle-bin (soft-deleted) documents.
+
+        Returns only rows whose status is ``deleted`` (``include_deleted=True``
+        with a DELETED status filter); live documents never appear here.
+        ``status_counts`` stays the LIVE counts (deleted excluded), matching
+        the main document listing, so the client can render "recycle bin: N
+        items" next to the live status breakdown.
+        """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
+        try:
+            (documents_with_ids, total_count), status_counts = await asyncio.gather(
+                rag.doc_status.get_docs_paginated(
+                    status_filter=DocStatus.DELETED,
+                    page=page,
+                    page_size=page_size,
+                    sort_field=sort_field,
+                    sort_direction=sort_direction,
+                    include_deleted=True,
+                ),
+                rag.doc_status.get_all_status_counts(),
+            )
+
+            doc_responses = []
+            for doc_id, doc in documents_with_ids:
+                doc_responses.append(
+                    DocStatusResponse(
+                        id=doc_id,
+                        content_summary=doc.content_summary,
+                        content_length=doc.content_length,
+                        status=doc.status,
+                        created_at=format_datetime(doc.created_at),
+                        updated_at=format_datetime(doc.updated_at),
+                        track_id=doc.track_id,
+                        chunks_count=doc.chunks_count,
+                        error_msg=doc.error_msg,
+                        metadata=doc.metadata,
+                        file_path=normalize_file_path(doc.file_path),
+                    )
+                )
+
+            total_pages = (total_count + page_size - 1) // page_size
+            pagination = PaginationInfo(
+                page=page,
+                page_size=page_size,
+                total_count=total_count,
+                total_pages=total_pages,
+                has_next=page < total_pages,
+                has_prev=page > 1,
+            )
+            return PaginatedDocsResponse(
+                documents=doc_responses,
+                pagination=pagination,
+                status_counts=status_counts,
+            )
+        except Exception as e:
+            logger.error(f"Error getting recycle-bin documents: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise internal_server_error(e)
+
+    @router.post(
+        "/restore",
+        response_model=RestoreDocsResponse,
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def restore_documents(
+        restore_request: RestoreDocsRequest,
+        http_request: Request,
+        rag=Depends(get_rag_dependency),
+        doc_manager=Depends(get_doc_manager_dependency),
+    ) -> RestoreDocsResponse:
+        """Restore soft-deleted documents from the recycle bin.
+
+        Flips each ``deleted`` row back to its recorded ``original_status``
+        and removes the ``deleted_at`` / ``deleted_by`` / ``original_status``
+        metadata markers. Vectors / graph / KV data / files were kept by the
+        soft delete, so the document is immediately live again. Rows that are
+        missing or not in the recycle bin are reported in ``failed_docs``
+        (not an error).
+        """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_restore",
+                "document",
+                None,
+                {"doc_ids": restore_request.doc_ids},
+            )
+
+        restored_docs: list[str] = []
+        failed_docs: list[str] = []
+        for doc_id in restore_request.doc_ids:
+            row = await rag.doc_status.get_by_id(doc_id)
+            if row is None or row.get("status") != "deleted":
+                failed_docs.append(doc_id)
+                continue
+            metadata = dict(row.get("metadata") or {})
+            original_status = metadata.pop("original_status", "processed")
+            metadata.pop("deleted_at", None)
+            metadata.pop("deleted_by", None)
+            try:
+                restored_status = DocStatus(original_status)
+            except ValueError:
+                restored_status = DocStatus.PROCESSED
+            await rag.doc_status.update_doc_status_fields(
+                doc_id,
+                {"status": restored_status, "metadata": metadata},
+                missing_ok=True,
+            )
+            restored_docs.append(doc_id)
+
+        return RestoreDocsResponse(
+            restored_docs=restored_docs,
+            failed_docs=failed_docs,
+            message=(
+                f"Restored {len(restored_docs)} document(s) from the recycle bin."
+                if restored_docs
+                else "No documents restored."
+            ),
+        )
+
+    @router.delete(
+        "/purge",
+        response_model=DeleteDocByIdResponse,
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def purge_documents(
+        purge_request: PurgeDocsRequest,
+        managed_tasks: set = Depends(get_managed_background_tasks),
+        http_request: Request = None,
+        rag=Depends(get_rag_dependency),
+        doc_manager=Depends(get_doc_manager_dependency),
+    ) -> DeleteDocByIdResponse:
+        """Permanently purge recycle-bin documents (physical delete).
+
+        Runs the same background destructive path as
+        ``DELETE /documents/delete_document`` with ``purge=true``: reserves
+        the destructive busy slot, then physically removes doc_status rows,
+        text chunks, vector embeddings, graph data (and optionally files /
+        LLM cache) for the given IDs. Irreversible.
+        """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        managed_tasks = await _ensure_managed_tasks(managed_tasks)
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_purge",
+                "document",
+                None,
+                {"doc_ids": purge_request.doc_ids, "purge": True},
+            )
+
+        from lightrag.kg.shared_storage import start_reserved_background_task
+
+        doc_ids = purge_request.doc_ids
+        destructive_token = uuid4().hex
+
+        async def _purge_work(started):
+            started.set()
+            await background_delete_documents(
+                rag,
+                doc_manager,
+                doc_ids,
+                purge_request.delete_file,
+                purge_request.delete_llm_cache,
+                destructive_token,
+            )
+
+        async def _purge_backstop():
+            await _release_destructive_busy(rag, destructive_token)
+
+        handed_off = False
+        try:
+            acquired, reason = await _acquire_destructive_busy(
+                rag,
+                destructive_token,
+                kind="purge",
+                operation_record={"kind": "purge", "doc_ids": doc_ids},
+            )
+            if not acquired:
+                return DeleteDocByIdResponse(
+                    status="busy",
+                    message=reason or "Cannot purge documents while pipeline is busy",
+                    doc_id=", ".join(doc_ids),
+                )
+
+            await start_reserved_background_task(
+                managed_tasks, work=_purge_work, backstop_release=_purge_backstop
+            )
+            handed_off = True
+
+            return DeleteDocByIdResponse(
+                status="deletion_started",
+                message=f"Permanent purge of {len(doc_ids)} documents has been initiated. Processing will continue in background.",
+                doc_id=", ".join(doc_ids),
+            )
+        except Exception as e:
+            error_msg = f"Error initiating document purge for {purge_request.doc_ids}: {str(e)}"
+            logger.error(error_msg)
+            logger.error(traceback.format_exc())
+            raise internal_server_error(e)
+        finally:
+            if not handed_off:
+                await _release_destructive_busy(rag, destructive_token)
+
+    @router.get(
         "/track_status/{track_id}",
         response_model=TrackStatusResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
     )
-    async def get_track_status(track_id: str) -> TrackStatusResponse:
+    async def get_track_status(
+    track_id: str, rag=Depends(get_rag_dependency), doc_manager=Depends(get_doc_manager_dependency)
+    ) -> TrackStatusResponse:
         """
         Get the processing status of documents by tracking ID.
 
@@ -6645,6 +7310,9 @@ def create_document_routes(
         Raises:
             HTTPException: If track_id is invalid (400) or an error occurs (500).
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         try:
             # Validate track_id
             if not track_id or not track_id.strip():
@@ -6698,10 +7366,12 @@ def create_document_routes(
     @router.post(
         "/paginated",
         response_model=PaginatedDocsResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
     )
     async def get_documents_paginated(
         request: DocumentsRequest,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ) -> PaginatedDocsResponse:
         """
         Get documents with pagination support.
@@ -6722,6 +7392,9 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving documents (500).
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         trace_id = uuid4().hex[:8]
         request_start = time.perf_counter()
         status_filter_value = (
@@ -6781,6 +7454,7 @@ def create_document_routes(
                         page_size=request.page_size,
                         sort_field=request.sort_field,
                         sort_direction=request.sort_direction,
+                        category=request.category,
                     ),
                 )
             )
@@ -6879,9 +7553,11 @@ def create_document_routes(
     @router.get(
         "/status_counts",
         response_model=StatusCountsResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
     )
-    async def get_document_status_counts() -> StatusCountsResponse:
+    async def get_document_status_counts(
+    rag=Depends(get_rag_dependency), doc_manager=Depends(get_doc_manager_dependency)
+    ) -> StatusCountsResponse:
         """
         Get counts of documents by status.
 
@@ -6894,6 +7570,9 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while retrieving status counts (500).
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         try:
             status_counts = await rag.doc_status.get_all_status_counts()
             return StatusCountsResponse(status_counts=status_counts)
@@ -6903,13 +7582,189 @@ def create_document_routes(
             logger.error(traceback.format_exc())
             raise internal_server_error(e)
 
+
+    # ------------------------------------------------------------------
+    # Document categories
+    # ------------------------------------------------------------------
+
+    async def _get_category_list(rag) -> list[str]:
+        """Read the workspace category list from KV storage."""
+        try:
+            raw = await rag.full_docs.get_by_id("_doc_categories")
+            if raw and "categories" in raw:
+                return list(raw["categories"])
+        except Exception:
+            pass
+        return []
+
+    async def _save_category_list(rag, categories: list[str]) -> None:
+        await rag.full_docs.upsert({
+            "_doc_categories": {"categories": categories}
+        })
+
+    @router.get(
+        "/categories",
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
+    )
+    async def list_categories(
+        rag=Depends(get_rag_dependency),
+    ):
+        """List all document categories with document counts."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        cats = await _get_category_list(rag)
+        # Count docs per category using paginated fetch with large page
+        result = {}
+        total = 0
+        page = 1
+        while True:
+            docs, count = await rag.doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="created_at", sort_direction="asc"
+            )
+            for _, doc in docs:
+                cat = (doc.metadata or {}).get("category", "") or ""
+                result[cat] = result.get(cat, 0) + 1
+            total = count
+            if page * 200 >= count:
+                break
+            page += 1
+        return {
+            "categories": [
+                {"name": c, "count": result.get(c, 0)} for c in cats
+            ],
+            "uncategorized_count": result.get("", 0),
+            "total_count": total,
+        }
+
+    class CategoryCreateRequest(BaseModel):
+        name: str = Field(..., min_length=1, max_length=50)
+
+    @router.post(
+        "/categories",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def create_category(
+        body: CategoryCreateRequest,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Create a new document category."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        cats = await _get_category_list(rag)
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Category name cannot be empty")
+        if name in cats:
+            raise HTTPException(status_code=409, detail="Category already exists")
+        cats.append(name)
+        await _save_category_list(rag, cats)
+        return {"name": name}
+
+    class CategoryRenameRequest(BaseModel):
+        new_name: str = Field(..., min_length=1, max_length=50)
+
+    @router.put(
+        "/categories/{old_name}",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def rename_category(
+        old_name: str,
+        body: CategoryRenameRequest,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Rename a category; all docs in it move to the new name."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        cats = await _get_category_list(rag)
+        new_name = body.new_name.strip()
+        if not new_name:
+            raise HTTPException(status_code=400, detail="Category name cannot be empty")
+        if old_name not in cats:
+            raise HTTPException(status_code=404, detail="Category not found")
+        if new_name in cats:
+            raise HTTPException(status_code=409, detail="Category already exists")
+        cats[cats.index(old_name)] = new_name
+        await _save_category_list(rag, cats)
+        # Rename in all docs
+        page = 1
+        while True:
+            docs, count = await rag.doc_status.get_docs_paginated(
+                category=old_name, page=page, page_size=200
+            )
+            for doc_id, doc in docs:
+                meta = dict(doc.metadata or {})
+                meta["category"] = new_name
+                await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+            if page * 200 >= count:
+                break
+            page += 1
+        return {"old_name": old_name, "new_name": new_name}
+
+    @router.delete(
+        "/categories/{name}",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def delete_category(
+        name: str,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Delete a category; docs in it become uncategorized."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        cats = await _get_category_list(rag)
+        if name not in cats:
+            raise HTTPException(status_code=404, detail="Category not found")
+        cats.remove(name)
+        await _save_category_list(rag, cats)
+        # Clear category from docs in it
+        page = 1
+        while True:
+            docs, count = await rag.doc_status.get_docs_paginated(
+                category=name, page=page, page_size=200
+            )
+            for doc_id, doc in docs:
+                meta = dict(doc.metadata or {})
+                meta.pop("category", None)
+                await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+            if page * 200 >= count:
+                break
+            page += 1
+        return {"deleted": name}
+
+    class DocCategoryAssignRequest(BaseModel):
+        category: str = Field(..., max_length=50)
+
+    @router.put(
+        "/{doc_id}/category",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def assign_document_category(
+        doc_id: str,
+        body: DocCategoryAssignRequest,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Assign a category to a document. Empty string clears it."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc = await rag.doc_status.get_by_id(doc_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        cats = await _get_category_list(rag)
+        cat = body.category.strip()
+        if cat and cat not in cats:
+            raise HTTPException(status_code=400, detail=f"Unknown category: {cat}")
+        meta = dict(doc.get("metadata") or {})
+        if cat:
+            meta["category"] = cat
+        else:
+            meta.pop("category", None)
+        await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+        return {"doc_id": doc_id, "category": cat}
+
     @router.get(
         "/supported_file_types",
         response_model=SupportedFileTypesResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
     )
     async def get_supported_file_types(
         response: Response,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ) -> SupportedFileTypesResponse:
         """
         Get the upload allowlist and the parser capability matrix.
@@ -6928,6 +7783,9 @@ def create_document_routes(
         ``Vary`` header, declared ahead of time so caches never reuse a
         response across workspaces).
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "LIGHTRAG-WORKSPACE"
         return SupportedFileTypesResponse(
@@ -6938,10 +7796,13 @@ def create_document_routes(
     @router.post(
         "/reprocess_failed",
         response_model=ReprocessResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
     )
     async def reprocess_failed_documents(
         managed_tasks: set = Depends(get_managed_background_tasks),
+    http_request: Request = None,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ):
         """
         Reprocess existing failed, pending, or interrupted document records
@@ -6976,6 +7837,18 @@ def create_document_routes(
                 required, or a clear/delete is dropping storages); 500 on
                 unexpected errors while initiating reprocessing.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+        managed_tasks = await _ensure_managed_tasks(managed_tasks)
+        if http_request is not None:
+            await _audit_request(
+                http_request,
+                "document_reprocess",
+                "workspace",
+                None,
+                None,
+            )
+
         from lightrag.exceptions import PipelineNotInitializedError
         from lightrag.kg.shared_storage import (
             ManualIntentRefused,
@@ -7087,10 +7960,12 @@ def create_document_routes(
     @router.post(
         "/recovery/force_reset",
         response_model=ForceResetRecoveryResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
     )
     async def force_reset_recovery(
         request: ForceResetRecoveryRequest,
+    rag=Depends(get_rag_dependency),
+    doc_manager=Depends(get_doc_manager_dependency),
     ) -> ForceResetRecoveryResponse:
         """Force-clear a ``recovery_required`` fence (UNSAFE, manual).
 
@@ -7135,6 +8010,9 @@ def create_document_routes(
         which a retry completes; the opposite order would admit "fence down,
         intents still queued", where ``/scan`` stays refused and nothing says so.
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         from lightrag.exceptions import PipelineNotInitializedError
         from lightrag.kg.shared_storage import (
             ENQUEUE_RESERVATION_KIND,
@@ -7388,9 +8266,11 @@ def create_document_routes(
     @router.post(
         "/cancel_pipeline",
         response_model=CancelPipelineResponse,
-        dependencies=[Depends(combined_auth)],
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
     )
-    async def cancel_pipeline():
+    async def cancel_pipeline(
+    rag=Depends(get_rag_dependency), doc_manager=Depends(get_doc_manager_dependency)
+    ):
         """
         Request cancellation of the currently running pipeline.
 
@@ -7411,6 +8291,9 @@ def create_document_routes(
         Raises:
             HTTPException: If an error occurs while setting cancellation flag (500).
         """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
+
         try:
             from lightrag.kg.shared_storage import (
                 get_namespace_data,

@@ -1480,7 +1480,7 @@ async def test_upload_accepts_c_when_custom_callback_is_injected(tmp_path, monke
     shared_storage = importlib.import_module("lightrag.kg.shared_storage")
     await shared_storage.initialize_pipeline_status(workspace=rag.workspace)
 
-    async def _no_op_index(rag_arg, file_path, track_id=None, admission_token=None):
+    async def _no_op_index(rag_arg, file_path, track_id=None, admission_token=None, owner=None):
         return None
 
     monkeypatch.setattr(_document_routes, "pipeline_index_file", _no_op_index)
@@ -1545,7 +1545,7 @@ async def test_upload_succeeds_concurrent_with_pipeline_busy(tmp_path, monkeypat
 
     gate = asyncio.Event()
 
-    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None):
+    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None, owner=None):
         await gate.wait()
 
     monkeypatch.setattr(_document_routes, "pipeline_index_file", _gated_index)
@@ -1688,7 +1688,7 @@ async def test_upload_succeeds_during_scan_processing_phase(tmp_path, monkeypatc
 
     gate = asyncio.Event()
 
-    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None):
+    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None, owner=None):
         await gate.wait()
 
     monkeypatch.setattr(_document_routes, "pipeline_index_file", _gated_index)
@@ -2621,7 +2621,7 @@ async def test_two_concurrent_uploads_both_succeed_when_pipeline_busy(
 
     gate = asyncio.Event()
 
-    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None):
+    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None, owner=None):
         await gate.wait()
 
     monkeypatch.setattr(_document_routes, "pipeline_index_file", _gated_index)
@@ -2915,7 +2915,7 @@ async def test_delete_document_reserves_destructive_busy_synchronously(tmp_path)
 
     managed: set = set()
     response = await delete_endpoint(
-        DeleteDocRequest(doc_ids=["doc-1"]),
+        DeleteDocRequest(doc_ids=["doc-1"], purge=True),
         managed,
     )
     assert response.status == "deletion_started"
@@ -2938,7 +2938,7 @@ async def test_delete_document_reserves_destructive_busy_synchronously(tmp_path)
     pipeline_status["scanning"] = True
     managed = set()
     response = await delete_endpoint(
-        DeleteDocRequest(doc_ids=["doc-1"]),
+        DeleteDocRequest(doc_ids=["doc-1"], purge=True),
         managed,
     )
     assert response.status == "busy"
@@ -2950,7 +2950,7 @@ async def test_delete_document_reserves_destructive_busy_synchronously(tmp_path)
     pipeline_status["pending_enqueues"] = 1
     managed = set()
     response = await delete_endpoint(
-        DeleteDocRequest(doc_ids=["doc-1"]),
+        DeleteDocRequest(doc_ids=["doc-1"], purge=True),
         managed,
     )
     assert response.status == "busy"
@@ -3034,7 +3034,7 @@ async def test_upload_managed_task_released_on_shutdown_drain(tmp_path, monkeypa
 
     gate = asyncio.Event()
 
-    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None):
+    async def _gated_index(rag_arg, file_path, track_id=None, admission_token=None, owner=None):
         await gate.wait()
 
     monkeypatch.setattr(_document_routes, "pipeline_index_file", _gated_index)
@@ -3096,7 +3096,7 @@ async def test_delete_managed_task_released_on_shutdown_drain(tmp_path):
 
     managed: set = set()
     response = await delete_endpoint(
-        _document_routes.DeleteDocRequest(doc_ids=["doc-1"]),
+        _document_routes.DeleteDocRequest(doc_ids=["doc-1"], purge=True),
         managed,
     )
     assert response.status == "deletion_started"
@@ -3790,8 +3790,7 @@ def test_sanitize_filename_preserves_safe_parser_hint_filename(tmp_path):
 
 def test_default_allowlist_equals_local_engine_suffixes(tmp_path, monkeypatch):
     """With no external endpoints and no routing rules, the registry-derived
-    allowlist must equal the local engines' (legacy ∪ native) suffixes —
-    i.e. exactly the historical hardcoded upload allowlist."""
+    allowlist must equal the local engines' (legacy ∪ native ∪ image) suffixes."""
     from lightrag.parser import registry
 
     for var in (
@@ -3803,12 +3802,14 @@ def test_default_allowlist_equals_local_engine_suffixes(tmp_path, monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
     dm = DocumentManager(str(tmp_path))
-    local = {f".{s}" for s in registry.suffix_capabilities("legacy")} | {
-        f".{s}" for s in registry.suffix_capabilities("native")
-    }
+    local = (
+        {f".{s}" for s in registry.suffix_capabilities("legacy")}
+        | {f".{s}" for s in registry.suffix_capabilities("native")}
+        | {f".{s}" for s in registry.suffix_capabilities("image")}
+    )
     assert set(dm.supported_extensions) == local
     # External-only suffixes stay out while their endpoints are unset.
-    assert ".png" not in dm.supported_extensions
+    assert ".jp2" not in dm.supported_extensions
     assert ".doc" not in dm.supported_extensions
 
 
@@ -3823,17 +3824,39 @@ def test_unroutable_suffix_needs_rule_or_hint(tmp_path, monkeypatch):
     monkeypatch.setenv("MINERU_LOCAL_ENDPOINT", "http://fake-mineru")
 
     dm = DocumentManager(str(tmp_path))
-    # Capable (endpoint up) but unroutable: bare png defaults to legacy.
-    assert ".png" not in dm.supported_extensions
-    assert not dm.is_supported_file("scan.png")
+    # Capable (endpoint up) but unroutable: bare jp2 has no per-suffix default
+    # and matches no usable rule, so resolution lands on legacy, which cannot
+    # parse it.
+    assert ".jp2" not in dm.supported_extensions
+    assert not dm.is_supported_file("scan.jp2")
     # A per-file hint routes this specific name to mineru.
-    assert dm.is_supported_file("scan.[mineru].png")
+    assert dm.is_supported_file("scan.[mineru].jp2")
     # A routing rule makes the bare suffix routable (and advertised).
-    monkeypatch.setenv("LIGHTRAG_PARSER", "png:mineru")
-    assert ".png" in dm.supported_extensions
-    assert dm.is_supported_file("scan.png")
+    monkeypatch.setenv("LIGHTRAG_PARSER", "jp2:mineru")
+    assert ".jp2" in dm.supported_extensions
+    assert dm.is_supported_file("scan.jp2")
     # docling-only suffixes stay out (endpoint unset), rule or not.
     assert ".xhtml" not in dm.supported_extensions
+
+
+def test_bare_raster_image_routes_to_builtin_image_engine(tmp_path, monkeypatch):
+    """png/jpg/jpeg/webp/gif are uploadable with zero configuration: the
+    per-suffix default sends them to the built-in image engine, never to
+    mineru — even when a MinerU endpoint happens to be configured."""
+    monkeypatch.delenv("LIGHTRAG_PARSER", raising=False)
+    monkeypatch.setenv("MINERU_API_MODE", "local")
+    monkeypatch.setenv("MINERU_LOCAL_ENDPOINT", "http://fake-mineru")
+
+    dm = DocumentManager(str(tmp_path))
+    for suffix in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+        assert suffix in dm.supported_extensions
+        assert dm.is_supported_file(f"scan{suffix}")
+    assert _parser_routing.resolve_file_parser_engine("scan.png") == "image"
+    assert _parser_routing.resolve_file_parser_engine("scan.gif") == "image"
+    # A rule or hint naming mineru still wins over the default.
+    assert dm.is_supported_file("scan.[mineru].png")
+    monkeypatch.setenv("LIGHTRAG_PARSER", "png:mineru")
+    assert _parser_routing.resolve_file_parser_engine("scan.png") == "mineru"
 
 
 def test_third_party_engine_suffixes_join_allowlist_and_scan(tmp_path, monkeypatch):

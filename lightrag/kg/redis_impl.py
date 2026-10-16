@@ -1685,6 +1685,8 @@ class RedisDocStatusStorage(DocStatusStorage):
         page_size: int = 50,
         sort_field: str = "updated_at",
         sort_direction: str = "desc",
+        include_deleted: bool = False,
+        category: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
         """Get documents with pagination support
 
@@ -1694,6 +1696,9 @@ class RedisDocStatusStorage(DocStatusStorage):
             page_size: Number of documents per page (10-200)
             sort_field: Field to sort by ('created_at', 'updated_at', 'id')
             sort_direction: Sort direction ('asc' or 'desc')
+            include_deleted: When False (default), recycle-bin rows
+                (``status == DELETED``) are excluded from both the page and the
+                total count.
 
         Returns:
             Tuple of (list of (doc_id, DocProcessingStatus) tuples, total_count)
@@ -1747,6 +1752,14 @@ class RedisDocStatusStorage(DocStatusStorage):
                                         status_filter_values is not None
                                         and doc_data.get("status")
                                         not in status_filter_values
+                                    ):
+                                        continue
+
+                                    # Recycle-bin rows are not part of the live
+                                    # listing unless explicitly requested.
+                                    if (
+                                        not include_deleted
+                                        and doc_data.get("status") == "deleted"
                                     ):
                                         continue
 
@@ -1805,13 +1818,25 @@ class RedisDocStatusStorage(DocStatusStorage):
 
         return paginated_docs, total_count
 
-    async def get_all_status_counts(self) -> dict[str, int]:
+    async def get_all_status_counts(
+        self, include_deleted: bool = False
+    ) -> dict[str, int]:
         """Get counts of documents in each status for all documents
+
+        Args:
+            include_deleted: When False (default), the ``deleted`` bucket is
+                omitted from the result entirely (recycle-bin rows are not part
+                of the live document counts).
 
         Returns:
             Dictionary mapping status names to counts, including 'all' field
         """
         counts = await self.get_status_counts()
+
+        # Recycle-bin rows are not part of the live document counts unless the
+        # caller explicitly asks for them.
+        if not include_deleted:
+            counts.pop(DocStatus.DELETED.value, None)
 
         # Add 'all' field with total count
         total_count = sum(counts.values())
@@ -1896,6 +1921,11 @@ class RedisDocStatusStorage(DocStatusStorage):
                     # no longer an eligible primary for this key (demoted to
                     # duplicate / file_path moved): self-heal.
                     await redis.srem(set_key, doc_id)
+                    continue
+                # Recycle-bin rows free their basename for re-upload; the
+                # multimap member is kept (restore flips status back and the
+                # row becomes visible again without touching the index).
+                if row.get("status") == "deleted":
                     continue
                 candidates.append((doc_id, row))
                 if limit is not None and len(candidates) >= limit:
@@ -2030,6 +2060,9 @@ class RedisDocStatusStorage(DocStatusStorage):
                                 f"holds the hash"
                             ) from e
                         if doc_data.get("content_hash") != content_hash:
+                            continue
+                        # Recycle-bin rows are not duplicate evidence.
+                        if doc_data.get("status") == "deleted":
                             continue
                         if self._row_points_at_as_duplicate(doc_data, exclude_doc_id):
                             continue

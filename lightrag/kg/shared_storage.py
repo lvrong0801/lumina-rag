@@ -42,6 +42,7 @@ from lightrag.exceptions import (
     PipelineBackpressureError,
     PipelineNotInitializedError,
 )
+from lightrag.namespace import sanitize_workspace_component
 from lightrag.kg.pipeline_ingress import (
     AsyncioPipelineIngress,
     ManagerPipelineIngress,
@@ -4119,7 +4120,7 @@ def set_default_workspace(workspace: str | None = None):
     global _default_workspace
     if workspace is None:
         workspace = ""
-    _default_workspace = workspace
+    _default_workspace = sanitize_workspace_component(workspace)
     direct_log(
         f"Default workspace set to: '{_default_workspace}' (empty means global)",
         level="DEBUG",

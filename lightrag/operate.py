@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import json_repair
 from typing import Any, AsyncIterator, overload, Literal, Callable, Awaitable
@@ -65,6 +66,7 @@ from lightrag.base import (
     BaseGraphStorage,
     BaseKVStorage,
     BaseVectorStorage,
+    DocStatusStorage,
     TextChunkSchema,
     QueryParam,
     QueryResult,
@@ -4702,6 +4704,7 @@ async def kg_query(
     system_prompt: str | None = None,
     chunks_vdb: BaseVectorStorage = None,
     progress_callback: ProgressCallback | None = None,
+    doc_status: DocStatusStorage | None = None,
 ) -> QueryResult | None:
     """
     Execute knowledge graph query and return unified QueryResult object.
@@ -4717,6 +4720,9 @@ async def kg_query(
         hashing_kv: Cache storage
         system_prompt: System prompt
         chunks_vdb: Document chunks vector database
+        doc_status: Doc-status storage used by the access filter to drop
+            owner-isolated chunks before generation (see
+            :func:`_filter_chunks_for_access`).
 
     Returns:
         QueryResult | None: Unified query result object containing:
@@ -4781,6 +4787,7 @@ async def kg_query(
         # The token budget must be computed against the template this function
         # will actually render below, not the default one.
         system_prompt=system_prompt,
+        doc_status=doc_status,
     )
 
     if context_result is None:
@@ -4889,6 +4896,18 @@ async def kg_query(
         *(("\n<system_prompt>\n", system_prompt) if system_prompt else ()),
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
+        # Access scope: the answer cache must never serve one tenant's
+        # context to another. The username (plus workspace, which already
+        # partitions the storage) splits the cache per requester. Only
+        # requests that carry an access_filter are keyed per-user: an
+        # unfiltered request (SDK callers, isolation disabled) must keep the
+        # exact pre-P1 key so existing cache entries still hit.
+        *(
+            ((query_param.access_filter or {}).get("username") or "",
+             (query_param.access_filter or {}).get("workspace") or "")
+            if query_param.access_filter
+            else ()
+        ),
     )
 
     cached_result = await handle_cache(
@@ -5218,6 +5237,148 @@ async def extract_keywords_only(
             )
 
     return hl_keywords, ll_keywords
+
+
+async def _filter_chunks_for_access(
+    chunks: list[dict],
+    access_filter: dict | None,
+    doc_status: DocStatusStorage | None = None,
+) -> list[dict]:
+    """Drop chunks whose owner-isolated document the requester may not cite.
+
+    Runs BEFORE the query context is assembled and the answer is generated, so
+    a private chunk never reaches the LLM prompt (the API layer's
+    ``reference_access`` filter is a second, display-layer pass). Mirrors the
+    owner-isolation rule of ``lightrag.api.reference_access``: an
+    owner-isolated document is visible to its owner, role=admin users, and
+    workspace admins (perms[workspace]=='admin' or perms['*']=='admin').
+
+    ``access_filter`` is the snapshot the API layer puts on QueryParam:
+    ``{"username", "workspace", "perms", "role", "is_service_admin"}``. When it
+    is absent or ``doc_status`` is unavailable the chunks pass through
+    untouched (legacy / fail-open behaviour).
+    """
+    if not chunks or not access_filter or doc_status is None:
+        return chunks
+    username = access_filter.get("username")
+    role = access_filter.get("role")
+    workspace = access_filter.get("workspace", "") or ""
+    perms = access_filter.get("perms") or {}
+    is_service_admin = bool(access_filter.get("is_service_admin"))
+
+    def _can_view(owner: str) -> bool:
+        if is_service_admin or role == "admin":
+            return True
+        if username and owner == username:
+            return True
+        return perms.get(workspace) == "admin" or perms.get("*") == "admin"
+
+    cache: dict[str, Any] = {}
+    kept: list[dict] = []
+    for chunk in chunks:
+        file_path = chunk.get("file_path", "")
+        if not file_path:
+            kept.append(chunk)
+            continue
+        basename = os.path.basename(file_path.replace("\\", "/"))
+        if not basename:
+            kept.append(chunk)
+            continue
+        try:
+            if basename not in cache:
+                cache[basename] = await doc_status.get_doc_by_file_basename(
+                    basename
+                )
+            resolved = cache[basename]
+            doc_data = resolved[1] if isinstance(resolved, tuple) else resolved
+        except Exception as e:  # fail-open: an unreadable store never 500s a query
+            logger.warning(
+                f"query access filter: doc_status lookup failed for "
+                f"'{basename}': {e}"
+            )
+            doc_data = None
+        if doc_data is None:
+            # Soft-deleted or unknown source: never feed it to the LLM.
+            continue
+        owner = (doc_data.get("metadata") or {}).get("owner") or None
+        if owner and not _can_view(owner):
+            logger.debug(
+                f"query access filter: dropped chunk from owner-isolated "
+                f"document '{basename}' for '{username or 'anon'}'"
+            )
+            continue
+        kept.append(chunk)
+    return kept
+
+
+async def _filter_entities_relations_for_access(
+    entities_context: list[dict],
+    relations_context: list[dict],
+    access_filter: dict | None,
+    doc_status: DocStatusStorage | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Drop KG entities/relations whose only source documents are soft-deleted
+    or owner-isolated away from the requester.
+
+    Mirrors ``_filter_chunks_for_access`` but operates on the entity/relation
+    context rows (their ``file_path`` is a ``<SEP>``-joined list of source
+    files). An entity/relation is kept when at least one source resolves to a
+    visible document; it is dropped only when every source is soft-deleted or
+    owner-isolated. Conservative: it never leaks, though a shared description
+    that also drew on a hidden source may be under-filtered (re-deriving a
+    hidden-free description is out of scope here).
+    """
+    if not access_filter or doc_status is None:
+        return entities_context, relations_context
+    username = access_filter.get("username")
+    role = access_filter.get("role")
+    workspace = access_filter.get("workspace", "") or ""
+    perms = access_filter.get("perms") or {}
+    is_service_admin = bool(access_filter.get("is_service_admin"))
+
+    def _can_view(owner: str) -> bool:
+        if is_service_admin or role == "admin":
+            return True
+        if username and owner == username:
+            return True
+        return perms.get(workspace) == "admin" or perms.get("*") == "admin"
+
+    cache: dict[str, Any] = {}
+
+    async def _has_visible_source(file_path: str) -> bool:
+        if not file_path or file_path == "unknown_source":
+            return True  # source-less KG object: keep
+        for raw in str(file_path).split(GRAPH_FIELD_SEP):
+            basename = os.path.basename(raw.replace("\\", "/"))
+            if not basename or basename == "unknown_source":
+                continue
+            try:
+                if basename not in cache:
+                    cache[basename] = await doc_status.get_doc_by_file_basename(
+                        basename
+                    )
+                resolved = cache[basename]
+                doc_data = resolved[1] if isinstance(resolved, tuple) else resolved
+            except Exception as e:  # fail-open: unreadable store never 500s a query
+                logger.warning(
+                    f"query access filter: doc_status lookup failed for "
+                    f"'{basename}': {e}"
+                )
+                doc_data = None
+            if doc_data is None:
+                continue  # soft-deleted/unknown source: not visible
+            owner = (doc_data.get("metadata") or {}).get("owner") or None
+            if not owner or _can_view(owner):
+                return True  # at least one visible source → keep
+        return False  # no visible source → drop
+
+    kept_ents = [
+        e for e in entities_context if await _has_visible_source(e.get("file_path", ""))
+    ]
+    kept_rels = [
+        r for r in relations_context if await _has_visible_source(r.get("file_path", ""))
+    ]
+    return kept_ents, kept_rels
 
 
 async def _get_vector_context(
@@ -6084,6 +6245,7 @@ async def _build_query_context(
     chunks_vdb: BaseVectorStorage = None,
     progress_callback: ProgressCallback | None = None,
     system_prompt: str | None = None,
+    doc_status: DocStatusStorage | None = None,
 ) -> QueryContextResult | None:
     """
     Main query context building function using the new 4-stage architecture:
@@ -6145,11 +6307,28 @@ async def _build_query_context(
     ):
         return None
 
+    # Owner isolation: drop chunks of private documents the requester may not
+    # cite BEFORE the answer is generated (the API layer re-filters the
+    # display lists afterwards; this closes the prompt-content leak).
+    if query_param.access_filter:
+        merged_chunks = await _filter_chunks_for_access(
+            merged_chunks, query_param.access_filter, doc_status
+        )
+        entities_context, relations_context = await _filter_entities_relations_for_access(
+            truncation_result["entities_context"],
+            truncation_result["relations_context"],
+            query_param.access_filter,
+            doc_status,
+        )
+    else:
+        entities_context = truncation_result["entities_context"]
+        relations_context = truncation_result["relations_context"]
+
     # Stage 4: Build final LLM context with dynamic token processing
     # _build_context_str now always returns tuple[str, dict]
     context, raw_data = await _build_context_str(
-        entities_context=truncation_result["entities_context"],
-        relations_context=truncation_result["relations_context"],
+        entities_context=entities_context,
+        relations_context=relations_context,
         merged_chunks=merged_chunks,
         query=query,
         query_param=query_param,
@@ -6858,6 +7037,7 @@ async def naive_query(
     system_prompt: str | None = None,
     text_chunks_db: BaseKVStorage | None = None,
     progress_callback: ProgressCallback | None = None,
+    doc_status: DocStatusStorage | None = None,
 ) -> QueryResult | None:
     """
     Execute naive query and return unified QueryResult object.
@@ -6869,6 +7049,9 @@ async def naive_query(
         global_config: Global configuration
         hashing_kv: Cache storage
         system_prompt: System prompt
+        doc_status: Doc-status storage used by the access filter to drop
+            owner-isolated chunks before generation (see
+            :func:`_filter_chunks_for_access`).
 
     Returns:
         QueryResult | None: Unified query result object containing:
@@ -6903,6 +7086,22 @@ async def naive_query(
             "[naive_query] No relevant document chunks found; returning no-result."
         )
         return None
+
+    # Owner isolation: drop chunks of private documents the requester may not
+    # cite BEFORE the answer is generated (the API layer re-filters the
+    # display lists afterwards; this closes the prompt-content leak).
+    if query_param.access_filter:
+        chunks = await _filter_chunks_for_access(
+            chunks, query_param.access_filter, doc_status
+        )
+        if not chunks:
+            logger.info(
+                "[naive_query] All retrieved chunks filtered by access; "
+                "returning no-result."
+            )
+            return QueryResult(
+                content=PROMPTS["fail_response"], llm_generated=False
+            )
 
     # Backfill heading path before token truncation so it counts toward the budget
     if global_config.get("enable_content_headings", False):
@@ -7052,6 +7251,18 @@ async def naive_query(
         *(("\n<system_prompt>\n", system_prompt) if system_prompt else ()),
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
+        # Access scope: the answer cache must never serve one tenant's
+        # context to another. The username (plus workspace, which already
+        # partitions the storage) splits the cache per requester. Only
+        # requests that carry an access_filter are keyed per-user: an
+        # unfiltered request (SDK callers, isolation disabled) must keep the
+        # exact pre-P1 key so existing cache entries still hit.
+        *(
+            ((query_param.access_filter or {}).get("username") or "",
+             (query_param.access_filter or {}).get("workspace") or "")
+            if query_param.access_filter
+            else ()
+        ),
     )
     cached_result = await handle_cache(
         answer_cache_kv, args_hash, user_query, query_param.mode, cache_type="query"

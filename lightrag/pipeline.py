@@ -749,6 +749,7 @@ class _PipelineMixin:
         chunk_options: dict | list[dict] | None = None,
         admission_token: str | None = None,
         from_scan: bool = False,
+        doc_status_extra: dict[str, Any] | None = None,
     ) -> str:
         """
         Pipeline for Processing Documents
@@ -1210,6 +1211,23 @@ class _PipelineMixin:
                 metadata["source_file"] = source_file
             if metadata:
                 base["metadata"] = metadata
+            if doc_status_extra:
+                # Known top-level doc-status columns are written as columns;
+                # everything else (e.g. ``owner``) lands inside ``metadata`` so
+                # it survives the soft-delete metadata round-trip on
+                # fixed-column backends (PG). Do not mutate the caller's dict:
+                # it is shared across every doc in this enqueue batch.
+                for key in ("overwrote", "incremental_of"):
+                    if key in doc_status_extra:
+                        base[key] = doc_status_extra[key]
+                metadata_extra = {
+                    k: v
+                    for k, v in doc_status_extra.items()
+                    if k not in ("overwrote", "incremental_of")
+                }
+                if metadata_extra:
+                    metadata.update(metadata_extra)
+                    base["metadata"] = metadata
             return base
 
         new_docs: dict[str, Any] = {
@@ -5883,6 +5901,27 @@ class _PipelineMixin:
                         metadata_drop=(KG_PURGE_METADATA_KEY,),
                     )
 
+                    # Incremental update: replace each old document's contribution
+                    # to shared entities/relations with this document's content.
+                    incremental_of = getattr(status_doc, "incremental_of", None)
+                    old_ids = (
+                        incremental_of
+                        if isinstance(incremental_of, list)
+                        else ([incremental_of] if incremental_of else [])
+                    )
+                    for old_id in old_ids:
+                        if not old_id or old_id == doc_id:
+                            continue
+                        try:
+                            await self.aapply_incremental_replace(old_id, doc_id)
+                        except Exception as replace_error:
+                            logger.error(
+                                "Incremental replace %s -> %s failed: %s",
+                                old_id,
+                                doc_id,
+                                replace_error,
+                            )
+
                     async with ctx.pipeline_status_lock:
                         log_message = (
                             f"Completed processing file "
@@ -6134,6 +6173,20 @@ class _PipelineMixin:
                 f"status write for {doc_id} ({file_path}): this run no longer "
                 f"owns the pipeline (ownership was reclaimed), so the result is "
                 f"late and must not overwrite the current owner's state"
+            )
+            return
+        # Soft-delete guard: a document soft-deleted mid-processing must not be
+        # resurrected by this late status write. The soft-delete path flips the
+        # row to DELETED while the worker is still in flight; without this the
+        # worker's PROCESSED/FAILED write would silently revive it.
+        current = await self.doc_status.get_by_id(doc_id)
+        if (
+            current is not None
+            and doc_status_field(current, "status", None) == DocStatus.DELETED
+        ):
+            logger.info(
+                f"Skipping {getattr(status, 'value', status)} transition for "
+                f"soft-deleted document {doc_id} ({file_path})"
             )
             return
         payload: dict[str, Any] = {

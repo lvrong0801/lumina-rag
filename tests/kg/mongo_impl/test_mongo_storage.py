@@ -1301,9 +1301,14 @@ class TestMongoDocStatusLookup:
         assert doc_id == "doc-1"
         assert doc["file_path"] == "report.pdf"
         # Primary-only lookup: duplicate markers (metadata.is_duplicate=true)
-        # are excluded so filename dedup never matches a dup-* row.
+        # are excluded so filename dedup never matches a dup-* row, and
+        # recycle-bin rows (status=deleted) are excluded too.
         storage._data.find_one.assert_awaited_once_with(
-            {"file_path": "report.pdf", "metadata.is_duplicate": {"$ne": True}}
+            {
+                "file_path": "report.pdf",
+                "status": {"$ne": "deleted"},
+                "metadata.is_duplicate": {"$ne": True},
+            }
         )
 
     @pytest.mark.asyncio
@@ -1354,7 +1359,9 @@ class TestMongoDocStatusLookup:
         doc_id, doc = result
         assert doc_id == "doc-1"
         assert doc["content_hash"] == "abc123"
-        storage._data.find.assert_called_once_with({"content_hash": "abc123"})
+        storage._data.find.assert_called_once_with(
+            {"content_hash": "abc123", "status": {"$ne": "deleted"}}
+        )
         assert cursor.sort_spec == [("created_at", 1), ("_id", 1)]
         assert cursor.limit_value == 1
 

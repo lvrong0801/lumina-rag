@@ -370,6 +370,8 @@ PARSER_ENGINE_LEGACY = "legacy"
 PARSER_ENGINE_NATIVE = "native"
 PARSER_ENGINE_MINERU = "mineru"
 PARSER_ENGINE_DOCLING = "docling"
+# Standalone raster-image engine: in-process, no external endpoint.
+PARSER_ENGINE_IMAGE = "image"
 PARSED_DIR_NAME = "__parsed__"  # Dir for parsed files (renamed from __enqueued__)
 # Reserved doc_status.metadata key holding the custom-chunk patch journal.
 # While present, the document has an in-flight or

@@ -10,6 +10,7 @@ import sys
 import time
 import uuid
 import logging
+from types import SimpleNamespace
 from ascii_colors import ASCIIColors
 from .._version import __api_version__ as api_version
 from .._version import __version__ as core_version
@@ -17,11 +18,12 @@ from lightrag.constants import (
     DEFAULT_FORCE_LLM_SUMMARY_ON_MERGE,
 )
 from lightrag.api.runtime_validation import validate_runtime_target_from_env_file
-from fastapi import HTTPException, Security, Request, Response, status
+from fastapi import Depends, HTTPException, Security, Request, Response, status
 from fastapi.security import APIKeyHeader, OAuth2PasswordBearer
 from starlette.status import HTTP_403_FORBIDDEN
-from ..utils import safe_log_value
+from ..utils import safe_log_value, validate_workspace
 from .auth import auth_handler
+from .rbac import get_rbac_manager
 from .config import (
     ollama_server_infos,
     global_args,
@@ -350,24 +352,47 @@ def path_is_whitelisted(scope: Mapping[str, Any], *, mount_prefix: str = "") -> 
     return False
 
 
+async def auth_configured_dynamic() -> bool:
+    """Authentication is configured when ``AUTH_ACCOUNTS`` has accounts OR the
+    RBAC users table holds at least one user.
+
+    The module-level ``auth_configured`` snapshot (taken at import time) is
+    accurate for ``AUTH_ACCOUNTS`` but not for a users table that an admin
+    populates at runtime — a first DB user must turn authentication on without
+    a restart. The RBAC manager TTL-caches the table presence check.
+    """
+    if auth_handler.accounts:
+        return True
+    rbac = await get_rbac_manager()
+    if rbac is None:
+        return False
+    return await rbac.has_any_user()
+
+
 def credentials_accepted(
     *,
     token: Optional[str],
     api_key_header_value: Optional[str],
     api_key: Optional[str],
+    auth_configured_override: Optional[bool] = None,
 ) -> bool:
     """Whether these credentials authenticate, per the configured auth mode.
 
     The acceptance rules, in one place, for every caller that needs the answer
     as a boolean rather than as an exception:
 
-      - fully open (no ``AUTH_ACCOUNTS``, no API key): nothing is protected
-        anywhere, so the request is authenticated;
+      - fully open (no ``AUTH_ACCOUNTS``, no users, no API key): nothing is
+        protected anywhere, so the request is authenticated;
       - a valid API key authenticates in any mode where one is configured;
-      - password auth (``AUTH_ACCOUNTS`` set): a valid non-guest token
-        authenticates. A guest token never does — in API-key-only mode it is
-        forgeable by anyone (GHSA-f4vv-55c2-5789 / GHSA-xr5c-v5r6-c9f9), so it
-        must not substitute for the API key.
+      - password auth (``AUTH_ACCOUNTS`` or RBAC users configured): a valid
+        non-guest token authenticates. A guest token never does — in
+        API-key-only mode it is forgeable by anyone
+        (GHSA-f4vv-55c2-5789 / GHSA-xr5c-v5r6-c9f9), so it must not substitute
+        for the API key.
+
+    ``auth_configured_override`` lets an async caller pass the dynamic value
+    (see :func:`auth_configured_dynamic`); when None the import-time snapshot
+    is used.
 
     Deliberately path-agnostic: ``WHITELIST_PATHS`` is a separate question
     (:func:`path_is_whitelisted`), because a whitelisted path is unauthenticated
@@ -375,7 +400,10 @@ def credentials_accepted(
     authenticated caller and reveal configuration.
     """
     api_key_configured = bool(api_key)
-    if not auth_configured and not api_key_configured:
+    effective_auth_configured = (
+        auth_configured if auth_configured_override is None else auth_configured_override
+    )
+    if not effective_auth_configured and not api_key_configured:
         return True
     if api_key_configured and api_key_header_value and api_key_header_value == api_key:
         return True
@@ -384,7 +412,11 @@ def credentials_accepted(
             token_info = auth_handler.validate_token(token)
         except Exception:
             token_info = None
-        if token_info and auth_configured and token_info.get("role") != "guest":
+        if (
+            token_info
+            and effective_auth_configured
+            and token_info.get("role") != "guest"
+        ):
             return True
     return False
 
@@ -441,6 +473,12 @@ def get_combined_auth_dependency(
         if respect_whitelist and path_is_whitelisted(request.scope):
             return  # Whitelist path, allow access
 
+        # Resolve auth mode dynamically: the import-time ``auth_configured``
+        # snapshot only knows AUTH_ACCOUNTS, but a first DB user (INIT_ADMIN or
+        # runtime-created via the admin API) must turn authentication on without
+        # a restart, matching /login's dynamic decision.
+        auth_on_dynamic = await auth_configured_dynamic()
+
         # 2. Validate token first if provided in the request (Ensure 401 error if token is invalid)
         # Kept in scope for step 4: in API-key-only mode a valid guest token
         # authenticates nothing and falls through to the API key check, which is
@@ -457,25 +495,39 @@ def get_combined_auth_dependency(
                 # state on requests the server rejects (GHSA-3wg5-5w54-3rfm).
 
                 # A token only authenticates when it matches the configured auth mode:
-                #   - password auth (AUTH_ACCOUNTS set): accept non-guest user tokens
-                #   - fully open (no AUTH_ACCOUNTS, no API key): accept guest tokens
+                #   - password auth (AUTH_ACCOUNTS or RBAC users set): accept
+                #     non-guest user tokens
+                #   - fully open (no AUTH_ACCOUNTS, no users, no API key): accept
+                #     guest tokens
                 # In the API-key-only profile (API key set, no AUTH_ACCOUNTS) a guest
                 # token must NOT authenticate: anyone can obtain one (via /auth-status,
                 # /login, or by signing it with the public default secret), so honoring
                 # it here would let a forged guest token bypass the X-API-Key check
                 # below (GHSA-f4vv-55c2-5789 / GHSA-xr5c-v5r6-c9f9). Instead, fall
                 # through so the API key stays mandatory in that mode.
-                if not auth_configured and token_info.get("role") == "guest":
+                auth_on = auth_on_dynamic
+                if not auth_on and token_info.get("role") == "guest":
                     if not api_key_configured:
                         _renew_token_if_needed(path, response, token_info)
+                        _attach_account(
+                            request,
+                            {"username": "guest", "role": "guest"},
+                        )
                         return
                     # API-key-only mode: ignore the guest token; the X-API-Key check
                     # below is the sole authority. Fall through (no return, no raise)
                     # and, critically, without renewal bookkeeping: this token did
                     # not authenticate anything.
-                elif auth_configured and token_info.get("role") != "guest":
+                elif auth_on and token_info.get("role") != "guest":
                     # Accept non-guest token if password auth is configured
                     _renew_token_if_needed(path, response, token_info)
+                    _attach_account(
+                        request,
+                        {
+                            "username": token_info.get("username"),
+                            "role": token_info.get("role", "user"),
+                        },
+                    )
                     return
                 else:
                     # Token present but not valid for the configured auth mode.
@@ -489,8 +541,9 @@ def get_combined_auth_dependency(
                     raise
                 # For other exceptions, continue processing
 
-        # 3. Acept all request if no API protection needed
-        if not auth_configured and not api_key_configured:
+        # 3. Accept all requests if no API protection is configured.
+        if not auth_on_dynamic and not api_key_configured:
+            _attach_account(request, {"username": "guest", "role": "guest"})
             return
 
         # 4. Validate API key if provided and API-Key authentication is configured
@@ -509,6 +562,14 @@ def get_combined_auth_dependency(
             # reaches the bookkeeping (GHSA-3wg5-5w54-3rfm).
             if token_info is not None:
                 _renew_token_if_needed(path, response, token_info)
+            _attach_account(
+                request,
+                {
+                    "username": "__api_key__",
+                    "role": "admin",
+                    "is_service_admin": True,
+                },
+            )
             return  # API key validation successful
 
         ### Authentication failed ####
@@ -541,6 +602,75 @@ def get_combined_auth_dependency(
         )
 
     return combined_dependency
+
+
+def _attach_account(request: Request, account: dict) -> None:
+    """Attach the authenticated identity to the request state so downstream
+    dependencies (``get_current_account``, ``authorize``) can read it without
+    re-validating credentials."""
+    if hasattr(request, "state") and request.state is not None:
+        request.state.account = account
+    else:
+        # Unit tests drive the dependency with a plain SimpleNamespace request
+        # double; give it a state slot so the identity survives.
+        request.state = SimpleNamespace(account=account)
+
+
+def get_current_account(request: Request) -> dict | None:
+    """FastAPI dependency returning the authenticated identity attached by the
+    combined auth dependency, or None for whitelisted/unauthenticated paths."""
+    return getattr(request.state, "account", None)
+
+
+def get_request_workspace(request: Request) -> str:
+    """Validate and return the ``LIGHTRAG-WORKSPACE`` header (``''`` default).
+
+    Rejects invalid workspace names with 400 so authorization never compares
+    against an unvalidated string (path separators would simply fail the grant
+    lookup, but failing fast matches ``validate_workspace`` used by storage).
+    """
+    raw = request.headers.get("LIGHTRAG-WORKSPACE", "").strip()
+    if not raw:
+        return ""
+    try:
+        return validate_workspace(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+def authorize(action_class: str):
+    """FastAPI dependency factory enforcing workspace RBAC for ``action_class``
+    (``'read'`` or ``'write'``).
+
+    No-op when RBAC is disabled (``RBAC_ENFORCE=false`` or PostgreSQL
+    unavailable): authentication alone is the gate, preserving current
+    behavior. When enforced, the caller must hold a grant for the request's
+    workspace (``LIGHTRAG-WORKSPACE`` header, ``''`` = default) whose level
+    satisfies the action class; admins and X-API-Key service callers bypass
+    the grant lookup.
+    """
+
+    async def _authorize(
+        request: Request,
+        account: dict | None = Depends(get_current_account),
+    ):
+        if account is None:
+            # Whitelisted path reached a protected route without credentials.
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Authentication required.",
+            )
+        rbac = await get_rbac_manager()
+        if rbac is None or not rbac.enforce:
+            return
+        workspace = get_request_workspace(request)
+        if not await rbac.check(account, action_class, workspace):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to access this workspace.",
+            )
+
+    return _authorize
 
 
 def get_auth_status_dependency(api_key: Optional[str] = None):
@@ -582,6 +712,7 @@ def get_auth_status_dependency(api_key: Optional[str] = None):
             token=token,
             api_key_header_value=api_key_header_value,
             api_key=api_key,
+            auth_configured_override=auth_configured,
         )
 
     return auth_status_dependency

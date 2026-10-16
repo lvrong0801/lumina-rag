@@ -16,6 +16,7 @@ from lightrag.constants import (
     FULL_DOCS_FORMAT_LIGHTRAG,
     FULL_DOCS_FORMAT_PENDING_PARSE,
     FULL_DOCS_FORMAT_RAW,
+    PARSER_ENGINE_IMAGE,
     PARSER_ENGINE_LEGACY,
     PARSER_ENGINE_NATIVE,
     PROCESS_OPTION_CHUNK_CHARS,
@@ -32,6 +33,7 @@ from lightrag.constants import (
     SUPPORTED_PROCESS_OPTIONS,
 )
 from lightrag.parser.registry import (
+    IMAGE_ENGINE_SUFFIXES,
     PARSER_ENGINE_PASSTHROUGH,
     PARSER_ENGINE_REUSE,
     engine_endpoint_configured,
@@ -61,12 +63,23 @@ from copy import deepcopy
 # can be reattached when stripping the hint.
 _PARSER_HINT_RE = re.compile(r"\.\[([^\]]*)\](\.[^.]+)$")
 
-# Per-suffix default engine override, consulted before the global ``legacy``
-# fallback. ``.textpack`` is handled only by the native engine, so it routes
-# there automatically (no filename hint / LIGHTRAG_PARSER rule needed). ``.md``
-# is deliberately absent — it keeps the legacy default and opts into native the
-# same way ``.docx`` does (hint or rule).
-_DEFAULT_ENGINE_BY_SUFFIX: dict[str, str] = {"textpack": PARSER_ENGINE_NATIVE}
+# Per-suffix default directives — ``(engine, process_options)`` consulted after
+# filename hints and matched LIGHTRAG_PARSER rules, before the global ``legacy``
+# fallback. The options half applies only when neither hint nor rule supplied an
+# options string, so explicit directives always win over these defaults.
+#
+# ``.textpack`` is handled only by the native engine, so it routes there
+# automatically (no filename hint / LIGHTRAG_PARSER rule needed). Raster image
+# suffixes route to the ``image`` engine with the ``i`` analysis option on:
+# an image's drawing tag carries no extractable text, so without defaulting the
+# VLM analysis opt-in on, a bare-image upload would succeed but ingest nothing.
+_DEFAULT_DIRECTIVES_BY_SUFFIX: dict[str, tuple[str, str]] = {
+    "textpack": (PARSER_ENGINE_NATIVE, ""),
+    **{
+        suffix: (PARSER_ENGINE_IMAGE, PROCESS_OPTION_IMAGES)
+        for suffix in IMAGE_ENGINE_SUFFIXES
+    },
+}
 
 
 class ParserRoutingConfigError(ValueError):
@@ -1430,7 +1443,9 @@ def resolve_parser_directives(
         2. ``LIGHTRAG_PARSER`` rules — first matching rule provides defaults
            for whichever of engine / options the filename hint did not
            specify.
-        3. Default engine ``legacy`` with empty options.
+        3. Per-suffix defaults (``_DEFAULT_DIRECTIVES_BY_SUFFIX``) — e.g.
+           ``.textpack`` to ``native``, raster images to ``image`` with ``i``.
+        4. Default engine ``legacy`` with empty options.
 
     Selector (``i/t/e/!/FRVPC``) keeps the legacy "filename options wholesale
     override rule options" behaviour.  Chunk parameters overlay per selector
@@ -1468,14 +1483,24 @@ def resolve_parser_directives(
         )
     )
 
-    default_engine = _DEFAULT_ENGINE_BY_SUFFIX.get(suffix)
-    if default_engine and not _engine_is_usable(
-        default_engine, suffix, require_external_endpoint=require_external_endpoint
-    ):
-        default_engine = None
+    default_engine: str | None = None
+    default_options = ""
+    default_directives = _DEFAULT_DIRECTIVES_BY_SUFFIX.get(suffix)
+    if default_directives is not None:
+        candidate_engine, candidate_options = default_directives
+        if _engine_is_usable(
+            candidate_engine,
+            suffix,
+            require_external_endpoint=require_external_endpoint,
+        ):
+            default_engine = candidate_engine
+            default_options = candidate_options
 
     engine = hinted_engine or rule_engine or default_engine or PARSER_ENGINE_LEGACY
-    options_str = hinted_options or rule_options
+    # Default options fill in only when neither hint nor rule said anything —
+    # they follow the suffix's purpose (e.g. image analysis), not the engine
+    # that won, so a hinted ``img.[mineru].png`` gets the same ``i`` default.
+    options_str = hinted_options or rule_options or default_options
 
     # Overlay chunk params per selector char: rule first, filename-hint wins.
     chunk_params: dict[str, dict[str, Any]] = {}

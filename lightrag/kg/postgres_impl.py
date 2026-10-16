@@ -2037,6 +2037,39 @@ class PostgreSQLDB:
                 f"Failed to create partial content_hash index on LIGHTRAG_DOC_STATUS: {e}"
             )
 
+    async def _migrate_doc_status_add_incremental_relation_columns(self):
+        """Add incremental_of / overwrote columns (TEXT holding a JSON array)."""
+        for column in ("incremental_of", "overwrote"):
+            try:
+                check_column_sql = f"""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'lightrag_doc_status'
+                  AND column_name = '{column}'
+                """
+                column_info = await self.query(check_column_sql)
+                if not column_info:
+                    logger.info(f"Adding {column} column to LIGHTRAG_DOC_STATUS table")
+                    await self.execute(
+                        f"ALTER TABLE LIGHTRAG_DOC_STATUS ADD COLUMN {column} TEXT NULL"
+                    )
+                    logger.info(
+                        f"Successfully added {column} column to LIGHTRAG_DOC_STATUS table"
+                    )
+                else:
+                    # Earlier dev version added varchar(255); widen to TEXT so a
+                    # JSON array of many ids cannot overflow.
+                    await self.execute(
+                        f"ALTER TABLE LIGHTRAG_DOC_STATUS ALTER COLUMN {column} TYPE TEXT"
+                    )
+                    logger.debug(
+                        f"{column} column already exists in LIGHTRAG_DOC_STATUS table (ensured TEXT)"
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Failed to add {column} column to LIGHTRAG_DOC_STATUS: {e}"
+                )
+
     async def _migrate_doc_status_add_scheduling_index(self):
         """Create the keyset-sweep index backing the memory-bounding scheduling
         page API (Phase 1).
@@ -2123,6 +2156,112 @@ class PostgreSQLDB:
             [index_name],
         )
         return bool(rows)
+
+    async def _migrate_create_enterprise_tables(self):
+        """Create the enterprise RBAC / audit tables if missing (idempotent).
+
+        ``LIGHTRAG_USERS`` and ``LIGHTRAG_WORKSPACE_PERMISSIONS`` back the
+        workspace-level RBAC model (see docs/design/enterprise-p0-plan.md);
+        ``LIGHTRAG_AUDIT_LOG`` records change operations. All three live on the
+        same PostgreSQLDB instance that serves doc-status, so no extra
+        connection or database is required. A workspace of ``''`` names the
+        default workspace; ``'*'`` is the wildcard grant.
+        """
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS LIGHTRAG_USERS (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer'
+                    CHECK (role IN ('admin', 'manager', 'viewer')),
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS LIGHTRAG_WORKSPACE_PERMISSIONS (
+                username TEXT NOT NULL
+                    REFERENCES LIGHTRAG_USERS(username) ON DELETE CASCADE,
+                workspace TEXT NOT NULL,
+                access_level TEXT NOT NULL DEFAULT 'read'
+                    CHECK (access_level IN ('read', 'write', 'admin')),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (username, workspace)
+            )
+            """
+        )
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS LIGHTRAG_AUDIT_LOG (
+                id BIGSERIAL PRIMARY KEY,
+                ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+                username TEXT,
+                role TEXT,
+                workspace TEXT,
+                action TEXT NOT NULL,
+                resource_type TEXT,
+                resource_id TEXT,
+                ip TEXT,
+                user_agent TEXT,
+                status TEXT NOT NULL,
+                detail JSONB,
+                request_id TEXT
+            )
+            """
+        )
+        for index_name, index_sql in (
+            (
+                "idx_audit_ts",
+                "CREATE INDEX IF NOT EXISTS idx_audit_ts "
+                "ON LIGHTRAG_AUDIT_LOG (ts DESC)",
+            ),
+            (
+                "idx_audit_username",
+                "CREATE INDEX IF NOT EXISTS idx_audit_username "
+                "ON LIGHTRAG_AUDIT_LOG (username)",
+            ),
+            (
+                "idx_audit_workspace",
+                "CREATE INDEX IF NOT EXISTS idx_audit_workspace "
+                "ON LIGHTRAG_AUDIT_LOG (workspace)",
+            ),
+            (
+                "idx_audit_action",
+                "CREATE INDEX IF NOT EXISTS idx_audit_action "
+                "ON LIGHTRAG_AUDIT_LOG (action)",
+            ),
+        ):
+            try:
+                await self.execute(index_sql)
+            except Exception as e:  # pragma: no cover - best effort
+                logger.warning(f"Failed to create audit index {index_name}: {e}")
+
+        # LIGHTRAG_WORKSPACES: persistent workspace metadata (owner, description,
+        # status) for multi-tenant deepening. 'active' workspaces accept writes;
+        # 'archived' are read-only. '' names the default workspace. The row is
+        # created by the /workspaces POST endpoint and consulted by the
+        # stateless list path (no directory scan).
+        await self.execute(
+            """
+            CREATE TABLE IF NOT EXISTS LIGHTRAG_WORKSPACES (
+                name         TEXT PRIMARY KEY,
+                owner        TEXT REFERENCES LIGHTRAG_USERS(username),
+                description  TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'active'
+                             CHECK (status IN ('active', 'archived')),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+        await self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workspaces_owner "
+            "ON LIGHTRAG_WORKSPACES (owner)"
+        )
 
     async def _migrate_text_chunks_add_heading_sidecar(self):
         """Add heading and sidecar JSONB columns to LIGHTRAG_DOC_CHUNKS if missing."""
@@ -2493,6 +2632,26 @@ class PostgreSQLDB:
         except Exception as e:
             logger.error(
                 f"PostgreSQL, Failed to migrate LIGHTRAG_DOC_STATUS content_hash field: {e}"
+            )
+
+        # Migrate LIGHTRAG_DOC_STATUS to add incremental_of / overwrote columns
+        # for the upload overwrite/incremental relationship tracking.
+        try:
+            await self._migrate_doc_status_add_incremental_relation_columns()
+        except Exception as e:
+            logger.error(
+                f"PostgreSQL, Failed to migrate LIGHTRAG_DOC_STATUS incremental relation fields: {e}"
+            )
+
+        # Create the enterprise RBAC / audit tables (idempotent). The RBAC
+        # manager and audit logger reuse this PostgreSQLDB instance; a failure
+        # here is logged but does not abort startup so a storage that cannot
+        # reach PostgreSQL keeps working in its degraded (auth-only) mode.
+        try:
+            await self._migrate_create_enterprise_tables()
+        except Exception as e:
+            logger.error(
+                f"PostgreSQL, Failed to migrate enterprise RBAC/audit tables: {e}"
             )
 
         # Migrate LIGHTRAG_DOC_CHUNKS to add heading / sidecar JSONB columns
@@ -5507,9 +5666,34 @@ _DOC_STATUS_UPDATABLE_COLUMNS = frozenset(
     }
 )
 # JSONB columns serialized exactly like the batch upsert does (json.dumps).
-_DOC_STATUS_JSON_COLUMNS = frozenset({"chunks_list", "metadata"})
+_DOC_STATUS_JSON_COLUMNS = frozenset(
+    {"chunks_list", "metadata", "incremental_of", "overwrote"}
+)
 # TIMESTAMP columns converted via _parse_doc_status_datetime like the upsert.
 _DOC_STATUS_DATETIME_COLUMNS = frozenset({"updated_at", "created_at"})
+
+
+def _parse_doc_status_relation_ids(value: Any) -> list[str] | None:
+    """Parse a doc_status relation field (JSON array string) into a list.
+
+    Tolerates both the JSON-array representation written by the current upsert
+    and a legacy single-id string so a partially-migrated table still reads.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value:
+            return None
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return [value]
+        if isinstance(parsed, list):
+            return [str(x) for x in parsed if x]
+        return [str(parsed)]
+    if isinstance(value, list):
+        return [str(x) for x in value if x]
+    return [str(value)]
 
 
 @final
@@ -5576,7 +5760,14 @@ class PGDocStatusStorage(DocStatusStorage):
             return set()
 
         table_name = namespace_to_table_name(self.namespace)
-        sql = f"SELECT id FROM {table_name} WHERE workspace=$1 AND id = ANY($2)"
+        # Soft-deleted rows release their id too: a recycled document's id is
+        # derived from its basename, so a re-upload of the same file must be
+        # treated as new work (consistent with get_doc_by_file_basename /
+        # get_doc_by_content_hash, which both exclude status='deleted').
+        sql = (
+            f"SELECT id FROM {table_name} "
+            "WHERE workspace=$1 AND id = ANY($2) AND status <> 'deleted'"
+        )
         params = {"workspace": self.workspace, "ids": list(keys)}
         try:
             res = await self.db.query(sql, list(params.values()), multirows=True)
@@ -5772,9 +5963,14 @@ class PGDocStatusStorage(DocStatusStorage):
         # (primary). metadata is JSONB, so ->> yields 'true'/'false' text that
         # casts cleanly; a non-boolean value raises and propagates (fail
         # closed) rather than silently matching.
+        #
+        # ``status <> 'deleted'`` excludes recycle-bin rows: a soft-deleted
+        # document frees its basename for re-upload (restore and re-upload of
+        # the same file coexist only through explicit recycle-bin restore).
         sql = (
             "SELECT * FROM LIGHTRAG_DOC_STATUS "
             "WHERE workspace=$1 AND file_path = $2 "
+            "AND status <> 'deleted' "
             "AND COALESCE((metadata->>'is_duplicate')::boolean, false) = false "
             "ORDER BY created_at ASC, id ASC LIMIT 1"
         )
@@ -5856,6 +6052,7 @@ class PGDocStatusStorage(DocStatusStorage):
         sql = (
             "SELECT * FROM LIGHTRAG_DOC_STATUS "
             f"WHERE workspace=$1 AND content_hash=$2{exclude_clause} "
+            "AND status <> 'deleted' "
             "ORDER BY created_at ASC, id ASC LIMIT 1"
         )
         result = await self.db.query(sql, params, True)
@@ -5899,8 +6096,14 @@ class PGDocStatusStorage(DocStatusStorage):
     # SQL predicate isolating PRIMARY (non-duplicate) rows. metadata is JSONB,
     # so ->> yields 'true'/'false' text that casts cleanly; a NULL/absent key
     # coalesces to false (primary), and a non-boolean value raises and
-    # propagates (fail closed) rather than silently matching.
-    _PRIMARY_PREDICATE = "COALESCE((metadata->>'is_duplicate')::boolean, false) = false"
+    # propagates (fail closed) rather than silently matching. Soft-deleted
+    # rows (status='deleted') are excluded too: a recycled document has
+    # released its basename and content_hash, so re-uploading it must not be
+    # flagged as a duplicate of the row sitting in the recycle bin.
+    _PRIMARY_PREDICATE = (
+        "COALESCE((metadata->>'is_duplicate')::boolean, false) = false "
+        "AND status <> 'deleted'"
+    )
 
     async def resolve_doc_source_strict(
         self, canonical_source_key: str
@@ -6576,6 +6779,12 @@ class PGDocStatusStorage(DocStatusStorage):
             error_msg=element.get("error_msg"),
             track_id=element.get("track_id"),
             content_hash=element.get("content_hash"),
+            incremental_of=_parse_doc_status_relation_ids(
+                element.get("incremental_of")
+            ),
+            overwrote=_parse_doc_status_relation_ids(
+                element.get("overwrote")
+            ),
         )
 
     async def get_docs_by_statuses(
@@ -6654,6 +6863,8 @@ class PGDocStatusStorage(DocStatusStorage):
         page_size: int = 50,
         sort_field: str = "updated_at",
         sort_direction: str = "desc",
+        include_deleted: bool = False,
+        category: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
         """Get documents with pagination support
 
@@ -6663,6 +6874,9 @@ class PGDocStatusStorage(DocStatusStorage):
             page_size: Number of documents per page (10-200)
             sort_field: Field to sort by ('created_at', 'updated_at', 'id')
             sort_direction: Sort direction ('asc' or 'desc')
+            include_deleted: When False (default), recycle-bin rows
+                (``status == DELETED``) are excluded from both the page and the
+                total count.
 
         Returns:
             Tuple of (list of (doc_id, DocProcessingStatus) tuples, total_count)
@@ -6718,6 +6932,20 @@ class PGDocStatusStorage(DocStatusStorage):
         else:
             where_clause = "WHERE workspace=$1"
 
+        # Recycle-bin rows are not part of the live document listing unless the
+        # caller explicitly asks for them (include_deleted=True, recycle bin).
+        if not include_deleted:
+            where_clause += " AND status <> 'deleted'"
+
+        # Category filter: metadata->>'category'
+        if category is not None:
+            if category == "":
+                where_clause += " AND (metadata->>'category' IS NULL OR metadata->>'category' = '')"
+            else:
+                param_count += 1
+                where_clause += f" AND metadata->>'category' = ${param_count}"
+                params["category_filter"] = category
+
         # Build ORDER BY clause using validated whitelist values.
         # NULLS LAST is applied in both the inner paged CTE and the outer query so
         # that the LIMIT/OFFSET slice boundary and the display order are identical.
@@ -6753,7 +6981,7 @@ class PGDocStatusStorage(DocStatusStorage):
             paged AS (
                 SELECT id, workspace, content_summary, content_length, chunks_count,
                        status, file_path, track_id, metadata, error_msg, content_hash,
-                       created_at, updated_at
+                       incremental_of, overwrote, created_at, updated_at
                 FROM LIGHTRAG_DOC_STATUS
                 {where_clause}
                 {order_clause}
@@ -6806,6 +7034,12 @@ class PGDocStatusStorage(DocStatusStorage):
                 metadata=metadata,
                 error_msg=element.get("error_msg"),
                 content_hash=element.get("content_hash"),
+                incremental_of=_parse_doc_status_relation_ids(
+                    element.get("incremental_of")
+                ),
+                overwrote=_parse_doc_status_relation_ids(
+                    element.get("overwrote")
+                ),
             )
             documents.append((doc_id, doc_status))
 
@@ -6825,8 +7059,15 @@ class PGDocStatusStorage(DocStatusStorage):
 
         return documents, total_count
 
-    async def get_all_status_counts(self) -> dict[str, int]:
+    async def get_all_status_counts(
+        self, include_deleted: bool = False
+    ) -> dict[str, int]:
         """Get counts of documents in each status for all documents
+
+        Args:
+            include_deleted: When False (default), the ``deleted`` bucket is
+                omitted from the result entirely (recycle-bin rows are not part
+                of the live document counts).
 
         Returns:
             Dictionary mapping status names to counts, including 'all' field
@@ -6840,8 +7081,10 @@ class PGDocStatusStorage(DocStatusStorage):
             SELECT status, COUNT(*) as count
             FROM LIGHTRAG_DOC_STATUS
             WHERE workspace=$1
-            GROUP BY status
         """
+        if not include_deleted:
+            sql += " AND status <> 'deleted'"
+        sql += "\n            GROUP BY status"
         params = {"workspace": self.workspace}
         query_timing_label = (
             f"{self.workspace} PGDocStatusStorage.get_all_status_counts"
@@ -6985,8 +7228,8 @@ class PGDocStatusStorage(DocStatusStorage):
         # which overwrites unconditionally. No caller today wants to clear a
         # content_hash, so the divergence is invisible — but if that ever
         # changes, this guard must be revisited.
-        sql = """insert into LIGHTRAG_DOC_STATUS(workspace,id,content_summary,content_length,chunks_count,status,file_path,chunks_list,track_id,metadata,error_msg,content_hash,created_at,updated_at)
-                 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        sql = """insert into LIGHTRAG_DOC_STATUS(workspace,id,content_summary,content_length,chunks_count,status,file_path,chunks_list,track_id,metadata,error_msg,incremental_of,overwrote,content_hash,created_at,updated_at)
+                 values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                   on conflict(id,workspace) do update set
                   content_summary = EXCLUDED.content_summary,
                   content_length = EXCLUDED.content_length,
@@ -6997,6 +7240,14 @@ class PGDocStatusStorage(DocStatusStorage):
                   track_id = EXCLUDED.track_id,
                   metadata = EXCLUDED.metadata,
                   error_msg = EXCLUDED.error_msg,
+                  incremental_of = COALESCE(
+                      NULLIF(EXCLUDED.incremental_of, ''),
+                      LIGHTRAG_DOC_STATUS.incremental_of
+                  ),
+                  overwrote = COALESCE(
+                      NULLIF(EXCLUDED.overwrote, ''),
+                      LIGHTRAG_DOC_STATUS.overwrote
+                  ),
                   content_hash = COALESCE(
                       NULLIF(EXCLUDED.content_hash, ''),
                       LIGHTRAG_DOC_STATUS.content_hash
@@ -7025,6 +7276,12 @@ class PGDocStatusStorage(DocStatusStorage):
                         v.get("track_id"),
                         json.dumps(v.get("metadata", {})),
                         v.get("error_msg"),
+                        json.dumps(v.get("incremental_of"))
+                        if v.get("incremental_of")
+                        else None,
+                        json.dumps(v.get("overwrote"))
+                        if v.get("overwrote")
+                        else None,
                         v.get("content_hash"),
                         _parse_doc_status_datetime(
                             v.get("created_at"),
@@ -9708,6 +9965,8 @@ TABLES = {
 	               track_id varchar(255) NULL,
 	               metadata JSONB NULL DEFAULT '{}'::jsonb,
 	               error_msg TEXT NULL,
+	               incremental_of TEXT NULL,
+	               overwrote TEXT NULL,
 	               -- content_hash is TEXT (not VARCHAR(N)) so the column is
 	               -- agnostic to the hash algorithm. Today's pipeline writes
 	               -- 64-char SHA-256 hex; future algos (SHA-512, base64) do

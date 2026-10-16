@@ -114,6 +114,22 @@ def _build_client(monkeypatch, *, notice=None):
 
     import lightrag.api.lightrag_server as lightrag_server
 
+    # /login resolves identity PG-RBAC-first since P0; these tests only assert
+    # the notice flag on the response, so isolate the real RBAC manager (a
+    # local PG with seeded bootstrap users would otherwise 401 the login).
+    # Patched here — after parse_args under a protected sys.argv — because
+    # importing lightrag.api.auth earlier re-triggers initialize_config
+    # against pytest's argv.
+    import lightrag.api.auth as auth_module
+    import lightrag.api.utils_api as utils_api_module
+
+    async def _no_rbac():
+        return None
+
+    monkeypatch.setattr(auth_module, "get_rbac_manager", _no_rbac)
+    monkeypatch.setattr(lightrag_server, "get_rbac_manager", _no_rbac)
+    monkeypatch.setattr(utils_api_module, "get_rbac_manager", _no_rbac)
+
     # auth_handler is an import-time singleton.  Clearing AUTH_ACCOUNTS before
     # parse_args() does not replace a profile previously built from the local
     # .env (or by an earlier test), so pin the runtime object as well.

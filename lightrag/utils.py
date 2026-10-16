@@ -7915,6 +7915,33 @@ def validate_workspace(workspace: str) -> str:
     return workspace
 
 
+def canonical_workspace_name(workspace: str) -> str:
+    """Normalize a workspace name into a backend-safe component.
+
+    Several backends (Milvus being the hardest) reject characters outside
+    ``[a-zA-Z0-9_]`` in the names they build from the workspace. Applying this
+    at every system entry point (HTTP header, POST /workspaces, env default,
+    ``WorkspaceManager`` validation, ``LightRAG.__post_init__``) keeps the
+    external-facing workspace name, the in-process namespace strings, and the
+    physical directory names identical so a request never lands on a
+    namespace nobody initialized.
+
+    The rules:
+    * every run of characters outside ``[a-zA-Z0-9_]`` collapses to a single
+      underscore (``"token-factory"`` -> ``"token_factory"``);
+    * a leading digit is prefixed with an underscore so Milvus accepts it;
+    * a name that is already a valid component is returned unchanged, so
+      existing deployments keep finding their data.
+
+    The original user-supplied name is preserved in audit logs and the
+    ``workspace`` directory on disk remains under ``working_dir/<sanitized>``
+    because the sanitizer is applied *before* any path or namespace join.
+    """
+    from lightrag.namespace import sanitize_workspace_component
+
+    return sanitize_workspace_component(validate_workspace(workspace))
+
+
 # Complement of the XML 1.0 ``Char`` production. GraphML is XML, so a string
 # holding any other code point cannot be serialized at all -- tab, newline and
 # carriage return are the only C0 controls XML admits, and descriptions

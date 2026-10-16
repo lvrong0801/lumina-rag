@@ -18,6 +18,7 @@ import logging
 import logging.config
 import sys
 import textwrap
+from typing import Optional
 import time
 import uuid
 import uvicorn
@@ -36,7 +37,17 @@ from lightrag.api.utils_api import (
     display_splash_screen,
     check_env_file,
     internal_server_error,
+    auth_configured,
+    auth_configured_dynamic,
 )
+from lightrag.api.audit import (
+    ACTION_LOGIN,
+    ACTION_LOGIN_FAILED,
+    AuditMiddleware,
+    get_audit_logger,
+)
+from lightrag.api.rbac import get_rbac_manager
+from lightrag.api.routers.admin_routes import create_admin_routes
 from lightrag.api.admission_middleware import AdmissionMiddleware
 from lightrag.api.body_limit_middleware import BodyLimitMiddleware, resolve_body_limits
 from .config import (
@@ -72,6 +83,8 @@ from lightrag.parser.routing import (
 from lightrag.parser.external.mineru.cache import MinerUParserOptions
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
+from lightrag.api.routers.workspace_routes import create_workspace_routes
+from lightrag.api.workspace_manager import WorkspaceManager
 from lightrag.api.routers.ollama_api import OllamaAPI
 from lightrag.api.routers.ui_customization_routes import create_ui_customization_routes
 from lightrag.api.ui_customization import (
@@ -80,7 +93,7 @@ from lightrag.api.ui_customization import (
     resolve_ui_customization_snapshot,
 )
 
-from lightrag.utils import logger, set_verbose_debug
+from lightrag.utils import logger, set_verbose_debug, validate_workspace, canonical_workspace_name
 from lightrag.kg.shared_storage import (
     get_namespace_data,
     get_default_workspace,
@@ -1648,6 +1661,53 @@ def create_app(args):
             # Note: initialize_storages() now auto-initializes pipeline_status for rag.workspace
             await rag.initialize_storages()
 
+            # Enterprise hardening (P0): RBAC manager, audit logger, and the
+            # per-workspace instance reclaim loop. PostgreSQL availability is
+            # probed lazily; when the storage stack has no PostgreSQL the
+            # system degrades to auth-only mode (no RBAC matrix, no audit
+            # trail) while keeping every other feature intact.
+            rbac_manager = await get_rbac_manager(
+                enforce=getattr(args, "rbac_enforce", False), args=args
+            )
+            app.state.rbac_manager = rbac_manager
+            if rbac_manager is not None:
+                seeded = await rbac_manager.seed_if_empty(
+                    getattr(args, "auth_accounts", ""),
+                    getattr(args, "init_admin_username", ""),
+                    getattr(args, "init_admin_password", ""),
+                )
+                if seeded:
+                    logger.info(
+                        "RBAC: bootstrap users seeded; authentication now configured"
+                    )
+            audit_logger = await get_audit_logger(
+                enabled=getattr(args, "audit_log_enabled", False), args=args
+            )
+            app.state.audit_logger = audit_logger
+            if audit_logger is not None and audit_logger.enabled:
+                logger.info("Audit trail enabled (change operations only)")
+
+            # Instance reclaim: periodically evict idle named-workspace
+            # instances so many tenants cannot grow memory without bound.
+            reclaim_task = None
+            if workspace_manager.idle_timeout_seconds > 0:
+                reclaim_interval = max(
+                    10, min(60, workspace_manager.idle_timeout_seconds // 3)
+                )
+
+                async def _workspace_reclaim_loop() -> None:
+                    while True:
+                        await asyncio.sleep(reclaim_interval)
+                        try:
+                            await workspace_manager.reclaim_idle_instances()
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as exc:  # pragma: no cover
+                            logger.warning(f"Workspace reclaim loop error: {exc}")
+
+                reclaim_task = asyncio.create_task(_workspace_reclaim_loop())
+                app.state.workspace_reclaim_task = reclaim_task
+
             # Data migration regardless of storage implementation
             await rag.check_and_migrate_data()
 
@@ -1676,6 +1736,15 @@ def create_app(args):
             yield
 
         finally:
+            # Stop the workspace reclaim loop before draining tasks/state.
+            reclaim_task = getattr(app.state, "workspace_reclaim_task", None)
+            if reclaim_task is not None:
+                reclaim_task.cancel()
+                try:
+                    await reclaim_task
+                except (asyncio.CancelledError, Exception):  # pragma: no cover
+                    pass
+
             # Cancel and join all reserved background tasks FIRST, so each
             # child's finally releases its reservation while shared state is
             # still alive. Resists repeated cancellation; a deferred shutdown
@@ -1686,6 +1755,7 @@ def create_app(args):
 
             # Clean up database connections
             await rag.finalize_storages()
+            await workspace_manager.finalize_all()
 
             if "LIGHTRAG_GUNICORN_MODE" not in os.environ:
                 # Only perform cleanup in Uvicorn single-process mode
@@ -1855,6 +1925,13 @@ def create_app(args):
         ],  # Expose token renewal header for cross-origin requests
     )
 
+    # Enterprise change-operation audit. The logger lives on app.state (set by
+    # the lifespan); until then the middleware no-ops. Order vs CORS is
+    # irrelevant for the audit path (read-only pass-through).
+    app.add_middleware(
+        AuditMiddleware, audit_logger=None, api_key=api_key
+    )  # audit_logger resolved from app.state per request
+
     # Create combined auth dependency for all endpoints
     combined_auth = get_combined_auth_dependency(api_key)
     # Non-enforcing dependency: reports whether the caller is authenticated so
@@ -1863,32 +1940,22 @@ def create_app(args):
 
     def get_workspace_from_request(request: Request) -> str | None:
         """
-        Extract workspace from HTTP request header or use default.
+        Extract the workspace name from the 'LIGHTRAG-WORKSPACE' header.
 
-        This enables multi-workspace API support by checking the custom
-        'LIGHTRAG-WORKSPACE' header. If not present, falls back to the
-        server's default workspace configuration.
-
-        Args:
-            request: FastAPI Request object
-
-        Returns:
-            Workspace identifier (may be empty string for global namespace)
+        Returns ``None`` when the header is absent so callers can fall back to
+        the server's default workspace. A present header must be a single path
+        component (no separators, not ``.``/``..``); invalid values are rejected
+        with 400 rather than silently rewritten, matching ``validate_workspace``
+        used by storage and ``DocumentManager``.
         """
-        # Check custom header first
         workspace = request.headers.get("LIGHTRAG-WORKSPACE", "").strip()
 
         if not workspace:
-            workspace = None
-        else:
-            sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", workspace)
-            if sanitized != workspace:
-                logger.warning(
-                    f"Workspace header '{workspace}' contains invalid characters. "
-                    f"Sanitized to '{sanitized}'."
-                )
-                workspace = sanitized
-
+            return None
+        try:
+            workspace = canonical_workspace_name(workspace)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         return workspace
 
     # Create working directory if it doesn't exist
@@ -2508,93 +2575,118 @@ def create_app(args):
         for spec in ROLES
     }
 
-    # Initialize RAG with unified configuration
-    try:
-        rag = LightRAG(
-            **({"chunking_func": selected_chunker} if selected_chunker else {}),
-            working_dir=args.working_dir,
-            workspace=args.workspace,
-            llm_model_func=create_llm_model_func(args.llm_binding),
-            llm_model_name=args.llm_model,
-            llm_model_max_async=args.max_async,
-            summary_max_tokens=args.summary_max_tokens,
-            summary_context_size=args.summary_context_size,
-            chunk_token_size=int(args.chunk_size),
-            chunk_overlap_token_size=int(args.chunk_overlap_size),
-            embedding_chunk_overlap_token_size=int(
-                args.embedding_chunk_overlap_token_size
-            ),
-            llm_model_kwargs=_create_llm_model_kwargs(
-                args.llm_binding, args, llm_timeout
-            ),
-            embedding_func=embedding_func,
-            default_llm_timeout=llm_timeout,
-            default_embedding_timeout=embedding_timeout,
-            kv_storage=args.kv_storage,
-            graph_storage=args.graph_storage,
-            vector_storage=args.vector_storage,
-            doc_status_storage=args.doc_status_storage,
-            vector_db_storage_cls_kwargs={
-                "cosine_better_than_threshold": args.cosine_threshold
-            },
-            enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
-            enable_llm_cache=args.enable_llm_cache,
-            vlm_process_enable=args.vlm_process_enable,
-            rerank_model_func=rerank_model_func,
-            rerank_model_max_async=args.rerank_max_async,
-            default_rerank_timeout=args.rerank_timeout,
-            max_parallel_insert=args.max_parallel_insert,
-            pipeline_scheduling_page_size=args.pipeline_scheduling_page_size,
-            pipeline_require_strict_storage_reads=args.pipeline_require_strict_storage_reads,
-            max_pending_documents=args.max_pending_documents,
-            max_graph_nodes=args.max_graph_nodes,
-            addon_params=addon_params,
-            ollama_server_infos=ollama_server_infos,
-            role_llm_configs={
-                spec.name: RoleLLMConfig(
-                    func=role_llm_configs[spec.name]["func"],
-                    kwargs=role_llm_configs[spec.name]["kwargs"],
-                    max_async=role_llm_configs[spec.name]["max_async"],
-                    timeout=role_llm_configs[spec.name]["timeout"],
-                    metadata={
-                        "base_binding": args.llm_binding,
-                        "binding": role_llm_configs[spec.name]["binding"],
-                        "model": role_llm_configs[spec.name]["model"],
-                        "host": role_llm_configs[spec.name]["host"],
-                        "api_key": role_llm_configs[spec.name]["api_key"],
-                        "provider_options": role_llm_configs[spec.name][
-                            "provider_options"
-                        ],
-                        "bedrock_aws_options": role_llm_configs[spec.name][
-                            "bedrock_aws_options"
-                        ],
-                        "is_cross_provider": role_llm_configs[spec.name][
-                            "is_cross_provider"
-                        ],
-                    },
-                )
-                for spec in ROLES
-            },
-        )
-    except Exception as e:
-        logger.error(f"Failed to initialize LightRAG: {e}")
-        raise
+    # Initialize RAG with unified configuration (per-workspace factory)
+    def build_rag(working_dir: str, workspace: str) -> LightRAG:
+        try:
+            rag = LightRAG(
+                **({"chunking_func": selected_chunker} if selected_chunker else {}),
+                working_dir=working_dir,
+                workspace=workspace,
+                llm_model_func=create_llm_model_func(args.llm_binding),
+                llm_model_name=args.llm_model,
+                llm_model_max_async=args.max_async,
+                summary_max_tokens=args.summary_max_tokens,
+                summary_context_size=args.summary_context_size,
+                chunk_token_size=int(args.chunk_size),
+                chunk_overlap_token_size=int(args.chunk_overlap_size),
+                embedding_chunk_overlap_token_size=int(
+                    args.embedding_chunk_overlap_token_size
+                ),
+                llm_model_kwargs=_create_llm_model_kwargs(
+                    args.llm_binding, args, llm_timeout
+                ),
+                embedding_func=embedding_func,
+                default_llm_timeout=llm_timeout,
+                default_embedding_timeout=embedding_timeout,
+                kv_storage=args.kv_storage,
+                graph_storage=args.graph_storage,
+                vector_storage=args.vector_storage,
+                doc_status_storage=args.doc_status_storage,
+                vector_db_storage_cls_kwargs={
+                    "cosine_better_than_threshold": args.cosine_threshold
+                },
+                enable_llm_cache_for_entity_extract=args.enable_llm_cache_for_extract,
+                enable_llm_cache=args.enable_llm_cache,
+                vlm_process_enable=args.vlm_process_enable,
+                rerank_model_func=rerank_model_func,
+                rerank_model_max_async=args.rerank_max_async,
+                default_rerank_timeout=args.rerank_timeout,
+                max_parallel_insert=args.max_parallel_insert,
+                pipeline_scheduling_page_size=args.pipeline_scheduling_page_size,
+                pipeline_require_strict_storage_reads=args.pipeline_require_strict_storage_reads,
+                max_pending_documents=args.max_pending_documents,
+                max_graph_nodes=args.max_graph_nodes,
+                addon_params=addon_params,
+                ollama_server_infos=ollama_server_infos,
+                role_llm_configs={
+                    spec.name: RoleLLMConfig(
+                        func=role_llm_configs[spec.name]["func"],
+                        kwargs=role_llm_configs[spec.name]["kwargs"],
+                        max_async=role_llm_configs[spec.name]["max_async"],
+                        timeout=role_llm_configs[spec.name]["timeout"],
+                        metadata={
+                            "base_binding": args.llm_binding,
+                            "binding": role_llm_configs[spec.name]["binding"],
+                            "model": role_llm_configs[spec.name]["model"],
+                            "host": role_llm_configs[spec.name]["host"],
+                            "api_key": role_llm_configs[spec.name]["api_key"],
+                            "provider_options": role_llm_configs[spec.name][
+                                "provider_options"
+                            ],
+                            "bedrock_aws_options": role_llm_configs[spec.name][
+                                "bedrock_aws_options"
+                            ],
+                            "is_cross_provider": role_llm_configs[spec.name][
+                                "is_cross_provider"
+                            ],
+                        },
+                    )
+                    for spec in ROLES
+                },
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize LightRAG: {e}")
+            raise
 
-    _log_role_provider_options(rag)
+        _log_role_provider_options(rag)
 
-    rag.register_role_llm_builder(
-        lambda role, meta: (
-            create_role_llm_func(role, meta),
-            create_role_llm_model_kwargs(role, meta),
+        rag.register_role_llm_builder(
+            lambda role, meta: (
+                create_role_llm_func(role, meta),
+                create_role_llm_model_kwargs(role, meta),
+            )
         )
+        return rag
+
+    rag = build_rag(args.working_dir, args.workspace)
+
+    workspace_manager = WorkspaceManager(
+        args=args,
+        rag_factory=build_rag,
+        max_instances=getattr(args, "workspace_max_instances", 8),
+        idle_timeout_seconds=getattr(args, "workspace_idle_timeout_seconds", 1800),
     )
+
+    async def get_rag_dependency(request: Request) -> LightRAG:
+        workspace = get_workspace_from_request(request)
+        if not workspace or workspace == args.workspace:
+            return rag
+        return await workspace_manager.get_instance(workspace)
+
+    async def get_doc_manager_dependency(request: Request) -> DocumentManager:
+        workspace = get_workspace_from_request(request)
+        if not workspace or workspace == args.workspace:
+            return doc_manager
+        return await workspace_manager.get_doc_manager(workspace)
 
     # Add routes
     # root_path is set on the app for reverse proxy support;
     # routes stay at their natural paths and are prefixed by the proxy or uvicorn --root-path
-    app.include_router(create_document_routes(rag, doc_manager, api_key))
-    app.include_router(create_query_routes(rag, api_key, args.top_k))
-    app.include_router(create_graph_routes(rag, api_key))
+    app.include_router(create_workspace_routes(workspace_manager, api_key))
+    app.include_router(create_admin_routes(api_key))
+    app.include_router(create_document_routes(get_rag_dependency, get_doc_manager_dependency, api_key))
+    app.include_router(create_query_routes(get_rag_dependency, api_key, args.top_k))
+    app.include_router(create_graph_routes(get_rag_dependency, api_key))
     # Public read-only customization surface — registered unconditionally:
     # without a bundle it answers 200 {"customized": false, ...}.
     app.include_router(
@@ -2722,11 +2814,80 @@ def create_app(args):
         """
         return {"status": "ok"}
 
+    @app.get(
+        "/healthz",
+        dependencies=[Depends(combined_auth)],
+        summary="Liveness probe (k8s)",
+        description=(
+            "Returns 200 while the process is alive. Whitelisted, so it needs "
+            "no credentials. For the rich diagnostics use /health."
+        ),
+    )
+    async def healthz():
+        return {"status": "healthy", "service": "LightRAG Server"}
+
+    @app.get(
+        "/readyz",
+        dependencies=[Depends(combined_auth)],
+        summary="Readiness probe (k8s)",
+        description=(
+            "Checks the storage stack is reachable: the working directory is "
+            "writable (file-backed storages) and PostgreSQL responds when the "
+            "configured stack uses it. Returns 503 while not ready. Credentials "
+            "are not required (whitelisted); the checks report only reachability."
+        ),
+    )
+    async def readyz():
+        checks: dict[str, Any] = {}
+        ready = True
+
+        # 1) Working directory writable (file-backed storages).
+        try:
+            wd = Path(args.working_dir)
+            wd.mkdir(parents=True, exist_ok=True)
+            probe = wd / ".ready_probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            checks["working_dir"] = "ok"
+        except Exception as exc:
+            checks["working_dir"] = f"error: {type(exc).__name__}: {exc}"
+            ready = False
+
+        # 2) PostgreSQL reachability when the stack uses it (RBAC/audit live on
+        # the doc-status PostgreSQLDB instance). Best-effort single row query.
+        pg_in_use = any(
+            "PG" in (getattr(args, k, "") or "")
+            for k in ("kv_storage", "doc_status_storage", "graph_storage", "vector_storage")
+        )
+        if pg_in_use:
+            try:
+                from lightrag.kg.postgres_impl import ClientManager
+
+                db = await ClientManager.get_client(
+                    vector_storage=getattr(args, "vector_storage", None)
+                )
+                rows = await db.query("SELECT 1 AS ok", multirows=True)
+                checks["postgresql"] = "ok" if rows else "unavailable"
+            except Exception as exc:
+                checks["postgresql"] = f"error: {type(exc).__name__}: {exc}"
+                ready = False
+        else:
+            checks["postgresql"] = "not_in_use"
+
+        return JSONResponse(
+            status_code=200 if ready else 503,
+            content={
+                "status": "ready" if ready else "not_ready",
+                "service": "LightRAG Server",
+                "checks": checks,
+            },
+        )
+
     @app.get("/auth-status")
     async def get_auth_status():
         """Get authentication status and guest token if auth is not configured"""
 
-        if not auth_handler.accounts:
+        if not await auth_configured_dynamic():
             # Authentication not configured, return guest token
             guest_token = auth_handler.create_token(
                 username="guest", role="guest", metadata={"auth_mode": "disabled"}
@@ -2764,9 +2925,36 @@ def create_app(args):
         window_seconds=getattr(args, "login_lockout_window_seconds", 300.0),
     )
 
+    async def _audit_login(
+        request: Request,
+        username: str,
+        *,
+        role: Optional[str] = None,
+        failed: bool,
+    ) -> None:
+        """Audit a login attempt (success or failure). Best-effort."""
+        audit_logger = getattr(app.state, "audit_logger", None)
+        if audit_logger is None or not audit_logger.enabled:
+            return
+        client = request.client
+        await audit_logger.record(
+            action=ACTION_LOGIN_FAILED if failed else ACTION_LOGIN,
+            status="failed" if failed else "success",
+            username=username,
+            role=role,
+            ip=client.host if client else None,
+            user_agent=request.headers.get("user-agent"),
+            detail={"auth_mode": "enabled"},
+        )
+
     @app.post("/login")
     async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
-        if not auth_handler.accounts:
+        # Authentication mode is decided per-request: AUTH_ACCOUNTS at boot OR
+        # a runtime-created DB user both turn on real authentication (unlike
+        # the boot-time snapshot used by /auth-status and the guards, which
+        # keep the upstream test contract). RBAC enforcement and per-request
+        # authorization decide actual access beyond this endpoint.
+        if not await auth_configured_dynamic():
             # Authentication not configured, return guest token
             guest_token = auth_handler.create_token(
                 username="guest", role="guest", metadata={"auth_mode": "disabled"}
@@ -2805,20 +2993,32 @@ def create_app(args):
         # so the decision is consistent. The reservation is always released in
         # the finally; only a confirmed wrong password becomes a real failure.
         login_rate_limiter.reserve_attempt(rate_limit_key)
+        account: dict | None = None
         try:
-            # verify_password runs a CPU-bound bcrypt for every attempt (incl.
-            # unknown usernames, to equalize timing). Run it in a worker thread
-            # so a login flood cannot block the event loop and starve the whole
-            # API (unauthenticated DoS).
+            # Resolve identity: PostgreSQL RBAC user first, AUTH_ACCOUNTS
+            # fallback. Unknown usernames resolve to a dummy account so the
+            # verification cost is identical to a real one (CWE-208).
+            account = await auth_handler.resolve_account(username)
+            if account is None:
+                account = {
+                    "username": username,
+                    "password_hash": None,
+                    "role": "viewer",
+                    "enabled": True,
+                }
+            # verify_password_for_account runs a CPU-bound bcrypt for every
+            # attempt; run it in a worker thread so a login flood cannot block
+            # the event loop (unauthenticated DoS).
             password_ok = await asyncio.to_thread(
-                auth_handler.verify_password, username, form_data.password
+                auth_handler.verify_password_for_account,
+                account,
+                form_data.password,
             )
-            # Record the outcome BEFORE releasing the reservation, so the entry
-            # still carries the failure (release removes a now-idle entry).
-            if not password_ok:
+            if not password_ok or not account.get("enabled", True):
                 # Confirmed failure -> count it (and emit the lockout alert only
                 # here, so a correct password on the Nth attempt never does).
                 login_rate_limiter.commit_failure(rate_limit_key)
+                await _audit_login(request, username, failed=True)
                 raise HTTPException(status_code=401, detail="Incorrect credentials")
             # Success clears the key's earlier failures.
             login_rate_limiter.reset(rate_limit_key)
@@ -2827,10 +3027,13 @@ def create_app(args):
             # key is fully idle, e.g. after a successful login).
             login_rate_limiter.release(rate_limit_key)
 
-        # Regular user login
+        # Regular user login: role comes from the resolved account (RBAC users
+        # table or AUTH_ACCOUNTS bootstrap).
+        role = account.get("role", "viewer")
         user_token = auth_handler.create_token(
-            username=username, role="user", metadata={"auth_mode": "enabled"}
+            username=username, role=role, metadata={"auth_mode": "enabled"}
         )
+        await _audit_login(request, username, role=role, failed=False)
         return {
             "access_token": user_token,
             "token_type": "bearer",
@@ -2916,12 +3119,21 @@ def create_app(args):
             default_workspace = get_default_workspace()
             if workspace is None:
                 workspace = default_workspace
-            pipeline_status = await get_namespace_data(
-                "pipeline_status", workspace=workspace
-            )
-            # One DictProxy RPC in multi-worker mode; keep /health read-only and
-            # avoid one cross-process ``get`` per field.
-            pipeline_snapshot = pipeline_status.copy()
+            try:
+                pipeline_status = await get_namespace_data(
+                    "pipeline_status", workspace=workspace
+                )
+                # One DictProxy RPC in multi-worker mode; keep /health read-only and
+                # avoid one cross-process ``get`` per field.
+                pipeline_snapshot = pipeline_status.copy()
+            except Exception as pipeline_error:
+                # Liveness probe first: a workspace whose pipeline_status has not
+                # been bootstrapped yet (instance not lazily created) must not turn
+                # /health into a 500. The pipeline fields below then read as idle.
+                logger.debug(
+                    f"Pipeline status unavailable for /health: {pipeline_error}"
+                )
+                pipeline_snapshot = {}
             pipeline_busy = bool(pipeline_snapshot.get("busy", False))
             pipeline_scanning = bool(pipeline_snapshot.get("scanning", False))
             pipeline_destructive_busy = bool(
@@ -2948,7 +3160,7 @@ def create_app(args):
             except Exception as ingress_error:
                 logger.debug(f"Ingress counts unavailable for /health: {ingress_error}")
 
-            if not auth_configured:
+            if not await auth_configured_dynamic():
                 auth_mode = "disabled"
             else:
                 auth_mode = "enabled"
@@ -3158,11 +3370,15 @@ def create_app(args):
 
             response = await super().get_response(path, scope)
 
+            # Starlette resolves paths with the host separator (Windows:
+            # ``assets\x.js``), so normalize before matching.
+            norm_path = path.replace("\\", "/")
+
             # `path` is empty when accessing the mount root (StaticFiles
             # rewrites it to index.html internally) — match on media_type
             # too so we still inject in that case.
             is_html = (
-                path.endswith(".html")
+                norm_path.endswith(".html")
                 or path == ""
                 or path.endswith("/")
                 or getattr(response, "media_type", None) == "text/html"
@@ -3181,7 +3397,7 @@ def create_app(args):
                 )
                 response.headers["Pragma"] = "no-cache"
                 response.headers["Expires"] = "0"
-            elif path.startswith("assets/") or "/assets/" in path:
+            elif norm_path.startswith("assets/") or "/assets/" in norm_path:
                 # Assets (JS, CSS, images, fonts) generated by Vite with hash
                 # in filename. Inside a Mount, `path` is relative (no leading
                 # slash) — "assets/x.js" — so match the top-level assets dir

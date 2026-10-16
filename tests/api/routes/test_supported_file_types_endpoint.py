@@ -64,14 +64,17 @@ def test_default_deployment_contract(client):
     assert isinstance(exts, list) and exts
     assert all(e.startswith(".") and e == e.lower() for e in exts)
     assert ".md" in exts and ".txt" in exts
+    # The built-in image engine admits bare raster uploads with zero config.
+    assert ".png" in exts and ".gif" in exts
 
     engines = body["engines"]
-    assert set(engines) >= {"native", "legacy"}
+    assert set(engines) >= {"native", "legacy", "image"}
     # External engines only join once their endpoint is configured.
     assert "mineru" not in engines and "docling" not in engines
     # Internal (non-user-selectable) engines are never advertised.
     assert "reuse" not in engines and "passthrough" not in engines
     assert engines["native"] == [".docx", ".md", ".textpack"]
+    assert engines["image"] == [".gif", ".jpeg", ".jpg", ".png", ".webp"]
     for suffixes in engines.values():
         assert all(s.startswith(".") and s == s.lower() for s in suffixes)
 
@@ -95,12 +98,16 @@ def test_mineru_routing_splits_allowlist_and_matrix(client, monkeypatch):
 
     body = client.get("/documents/supported_file_types", headers=_HEADERS).json()
 
-    # Bare .jpg routes to mineru via the rule; bare .png falls through to
-    # legacy which cannot parse it, so only the matrix advertises png.
+    # Bare .jpg routes to mineru via the rule; bare .jp2 matches no usable
+    # rule and has no per-suffix default, so only the matrix advertises jp2.
     assert ".jpg" in body["supported_extensions"]
-    assert ".png" not in body["supported_extensions"]
-    assert ".png" in body["engines"]["mineru"]
+    assert ".jp2" not in body["supported_extensions"]
+    assert ".jp2" in body["engines"]["mineru"]
     assert ".jpg" in body["engines"]["mineru"]
+    # Raster formats the rule does not claim fall through to the built-in
+    # image engine, so they stay uploadable without mineru.
+    assert ".png" in body["supported_extensions"]
+    assert ".png" in body["engines"]["image"]
 
 
 def test_matrix_tracks_dynamic_registry(client):

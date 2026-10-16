@@ -761,6 +761,27 @@ class MilvusVectorDBStorage(BaseVectorStorage):
 
         return connection_kwargs
 
+    def _sanitize_collection_name(self, name: str) -> str:
+        """Sanitize a workspace name into a valid Milvus collection name.
+
+        Milvus collection names must match ``^[a-zA-Z_][a-zA-Z0-9_]*$``.
+        Multi-word workspace names (e.g. ``"token-factory"``) are rejected
+        by Milvus at creation time, showing up as::
+
+            MilvusException: (code=1100, message=Invalid collection name:
+            token-factory_entities_qwen3_embedding_4b_2560d ...)
+
+        Replace every run of characters outside ``[a-zA-Z0-9_]`` with a
+        single underscore, and prefix a leading digit with an underscore.
+        This preserves readability (``"token-factory"`` ->
+        ``"token_factory"``) and never changes a name that was already valid,
+        so an unmigrated legacy namespace continues to find its rows.
+        """
+        sanitized = re.sub(r"[^a-zA-Z0-9_]+", "_", name)
+        if sanitized and sanitized[0].isdigit():
+            sanitized = "_" + sanitized
+        return sanitized
+
     def _get_milvus_db_name(self) -> Optional[str]:
         """Return the configured Milvus database name, if any."""
         db_name = self._get_milvus_connection_kwargs(include_db_name=True).get(

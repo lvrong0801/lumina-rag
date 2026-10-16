@@ -1184,7 +1184,7 @@ async def test_analysis_cache_respects_disabled_flag(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_oversized_table_content_truncated_to_extract_budget(tmp_path):
+async def test_oversized_table_content_truncated_to_extract_budget(tmp_path, monkeypatch):
     """A sidecar table whose ``content`` alone exceeds the EXTRACT input
     cap must be trimmed before reaching the LLM.  The captured prompt
     must (a) fit within ``DEFAULT_MAX_EXTRACT_INPUT_TOKENS``, (b) still
@@ -1192,6 +1192,12 @@ async def test_oversized_table_content_truncated_to_extract_budget(tmp_path):
     truncation marker so the LLM is told the body is incomplete.
     """
     from lightrag.constants import DEFAULT_MAX_EXTRACT_INPUT_TOKENS
+
+    # A host .env MAX_EXTRACT_INPUT_TOKENS override widens the cap this test
+    # pins; set an explicit value so the assertion measures the trim logic
+    # (delenv alone does not hold: the next lightrag import re-runs
+    # load_dotenv(".env", override=False) and silently repopulates the var).
+    monkeypatch.setenv("MAX_EXTRACT_INPUT_TOKENS", str(DEFAULT_MAX_EXTRACT_INPUT_TOKENS))
 
     extract_log: list[dict] = []
     rag = _build_rag(

@@ -433,6 +433,8 @@ class JsonDocStatusStorage(DocStatusStorage):
         page_size: int = 50,
         sort_field: str = "updated_at",
         sort_direction: str = "desc",
+        include_deleted: bool = False,
+        category: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
         """Get documents with pagination support
 
@@ -442,6 +444,9 @@ class JsonDocStatusStorage(DocStatusStorage):
             page_size: Number of documents per page (10-200)
             sort_field: Field to sort by ('created_at', 'updated_at', 'id')
             sort_direction: Sort direction ('asc' or 'desc')
+            include_deleted: When False (default), recycle-bin rows
+                (``status == DELETED``) are excluded from both the page and the
+                total count.
 
         Returns:
             Tuple of (list of (doc_id, DocProcessingStatus) tuples, total_count)
@@ -488,6 +493,10 @@ class JsonDocStatusStorage(DocStatusStorage):
                     status_filter_values is not None
                     and doc_data.get("status") not in status_filter_values
                 ):
+                    continue
+                # Recycle-bin rows are not part of the live document listing
+                # unless the caller explicitly asks for them.
+                if not include_deleted and doc_data.get("status") == "deleted":
                     continue
                 # Validate via a real (throwaway) construction attempt rather
                 # than checking a fixed set of required-field names: a row
@@ -540,13 +549,25 @@ class JsonDocStatusStorage(DocStatusStorage):
 
         return paginated_docs, total_count
 
-    async def get_all_status_counts(self) -> dict[str, int]:
+    async def get_all_status_counts(
+        self, include_deleted: bool = False
+    ) -> dict[str, int]:
         """Get counts of documents in each status for all documents
+
+        Args:
+            include_deleted: When False (default), the ``deleted`` bucket is
+                omitted from the result entirely (recycle-bin rows are not part
+                of the live document counts).
 
         Returns:
             Dictionary mapping status names to counts, including 'all' field
         """
         counts = await self.get_status_counts()
+
+        # Recycle-bin rows are not part of the live document counts unless the
+        # caller explicitly asks for them.
+        if not include_deleted:
+            counts.pop(DocStatus.DELETED.value, None)
 
         # Add 'all' field with total count
         total_count = sum(counts.values())
@@ -638,6 +659,9 @@ class JsonDocStatusStorage(DocStatusStorage):
             return None
         async with self._storage_lock:
             for doc_id, doc_data in self._data.items():
+                # Recycle-bin rows free their basename for re-upload.
+                if doc_data.get("status") == "deleted":
+                    continue
                 if doc_data.get("file_path") == basename and not self._is_duplicate_row(
                     doc_data
                 ):
@@ -723,6 +747,9 @@ class JsonDocStatusStorage(DocStatusStorage):
         async with self._storage_lock:
             for doc_id, doc_data in self._data.items():
                 if doc_id == exclude_doc_id:
+                    continue
+                # Recycle-bin rows are not duplicate evidence.
+                if doc_data.get("status") == "deleted":
                     continue
                 if self._row_points_at_as_duplicate(doc_data, exclude_doc_id):
                     continue

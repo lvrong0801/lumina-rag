@@ -376,6 +376,11 @@ _DOC_STATUS_METADATA_CARRY_OVER_KEYS: tuple[str, ...] = (
     "source_file",
     "parse_warnings",
     "chunk_opts",
+    # Owner isolation: metadata.owner is written at enqueue (upload/text
+    # endpoints) and read by reference_access on every query; dropping it on
+    # a status transition silently turns an owner-isolated private document
+    # into a public one, so it must survive every transition to PROCESSED.
+    "owner",
     # Last attempted registry identity, explicitly non-authoritative. Retained
     # for drift diagnostics, never for admission or dispatch decisions.
     "custom_chunker",

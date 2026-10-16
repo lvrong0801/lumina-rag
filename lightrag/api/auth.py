@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from ..utils import logger
 from .config import DEFAULT_TOKEN_SECRET, global_args
 from .passwords import BCRYPT_PASSWORD_PREFIX, verify_password
+from .rbac import get_rbac_manager
 
 # use the .env that is inside the current folder
 # allows to use different .env file for each lightrag instance
@@ -134,16 +135,55 @@ class AuthHandler:
             verify_password(plain_password, _DUMMY_VERIFY_SPEC)
             return False
 
+        return self.verify_password_for_account(
+            {"password_hash": stored_password}, plain_password
+        )
+
+    @staticmethod
+    def verify_password_for_account(account: dict, plain_password: str) -> bool:
+        """Verify a password against a resolved account row.
+
+        Mirrors :meth:`verify_password`'s timing contract (exactly one bcrypt
+        verification per call, dummy spec for unknown/missing hashes) so login
+        latency does not reveal whether an account exists or how its password
+        is stored (CWE-208).
+        """
+        stored_password = account.get("password_hash")
+        if not stored_password:
+            verify_password(plain_password, _DUMMY_VERIFY_SPEC)
+            return False
         if not stored_password.startswith(BCRYPT_PASSWORD_PREFIX):
-            # Known plaintext account: the constant-time plaintext compare is
-            # only microseconds, so add one dummy bcrypt to match the cost of an
-            # unknown username and a {bcrypt} account. Keep the real result.
+            # Known plaintext account: constant-time compare is microseconds,
+            # so add one dummy bcrypt to match the cost of the other branches.
             password_matches = verify_password(plain_password, stored_password)
             verify_password(plain_password, _DUMMY_VERIFY_SPEC)
             return password_matches
-
         # Known {bcrypt} account: the real verification already costs one bcrypt.
         return verify_password(plain_password, stored_password)
+
+    async def resolve_account(self, username: str) -> dict | None:
+        """Resolve a login identity: PostgreSQL RBAC user first, then the
+        ``AUTH_ACCOUNTS`` memory table as fallback.
+
+        Returns ``{username, password_hash, role, enabled}`` or ``None``. The
+        ``AUTH_ACCOUNTS`` fallback grants ``role=admin`` (its accounts are the
+        deployment owner's bootstrap credentials; the RBAC manager seeds them
+        as admins when the users table is empty).
+        """
+        rbac = await get_rbac_manager()
+        if rbac is not None:
+            user = await rbac.get_user(username)
+            if user is not None:
+                return user
+        stored = self.accounts.get(username)
+        if stored is not None:
+            return {
+                "username": username,
+                "password_hash": stored,
+                "role": "admin",
+                "enabled": True,
+            }
+        return None
 
     def create_token(
         self,

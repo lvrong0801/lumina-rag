@@ -100,6 +100,22 @@ def _build_server(monkeypatch):
 
     import lightrag.api.lightrag_server as lightrag_server
 
+    # Login resolves identity PG-RBAC-first since P0; these tests exercise the
+    # AUTH_ACCOUNTS fallback, so isolate the real RBAC manager (a local PG with
+    # seeded bootstrap users would otherwise win the resolution and reject the
+    # fixture's plaintext password). Patched here — after parse_args under a
+    # protected sys.argv — because importing lightrag.api.auth at fixture time
+    # re-triggers initialize_config against pytest's argv.
+    import lightrag.api.auth as auth_module
+    import lightrag.api.utils_api as utils_api_module
+
+    async def _no_rbac():
+        return None
+
+    monkeypatch.setattr(auth_module, "get_rbac_manager", _no_rbac)
+    monkeypatch.setattr(lightrag_server, "get_rbac_manager", _no_rbac)
+    monkeypatch.setattr(utils_api_module, "get_rbac_manager", _no_rbac)
+
     monkeypatch.setattr(lightrag_server, "LightRAG", _FakeLightRAG)
     monkeypatch.setattr(lightrag_server, "check_frontend_build", lambda: (True, False))
     for factory in (
@@ -184,7 +200,11 @@ def test_login_offloads_verification_to_thread(monkeypatch):
     resp = client.post("/login", data={"username": "admin", "password": "s3cret-plain"})
 
     assert resp.status_code == 200
-    assert "verify_password" in offloaded
+    # The enterprise (P0) login resolves the account first, then offloads
+    # verify_password_for_account — the single-bcrypt primitive that replaced
+    # the old verify_password direct call. Keep the assertion on the
+    # verify_* family so it keeps guarding "bcrypt off the event loop".
+    assert any(name == "verify_password_for_account" for name in offloaded)
 
 
 def test_login_locks_out_after_max_failed_attempts(monkeypatch):

@@ -2563,8 +2563,15 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
         page_size: int = 50,
         sort_field: str = "updated_at",
         sort_direction: str = "desc",
+        include_deleted: bool = False,
+        category: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
-        """Get documents with pagination using PIT + search_after."""
+        """Get documents with pagination using PIT + search_after.
+
+        When ``include_deleted`` is False (default), recycle-bin rows
+        (``status == DELETED``) are excluded from both the page and the total
+        count.
+        """
         if not self._index_ready:
             return [], 0
         status_filter_values = self.resolve_status_filter_values(
@@ -2585,6 +2592,13 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
                 query = {"term": {"status": next(iter(status_filter_values))}}
             else:
                 query = {"terms": {"status": sorted(status_filter_values)}}
+        if not include_deleted:
+            query = {
+                "bool": {
+                    "must": [query],
+                    "must_not": [{"term": {"status": "deleted"}}],
+                }
+            }
 
         skip_count = (page - 1) * page_size
 
@@ -2658,15 +2672,25 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
             logger.error(f"[{self.workspace}] Error in paginated query: {e}")
             return [], 0
 
-    async def get_all_status_counts(self) -> dict[str, int]:
-        """Get document counts for all statuses including an 'all' total."""
+    async def get_all_status_counts(
+        self, include_deleted: bool = False
+    ) -> dict[str, int]:
+        """Get document counts for all statuses including an 'all' total.
+
+        When ``include_deleted`` is False (default), the ``deleted`` bucket is
+        omitted (recycle-bin rows are not part of the live document counts).
+        """
         if not self._index_ready:
             return {}
         try:
-            body = {
+            body: dict = {
                 "size": 0,
                 "aggs": {"status_counts": {"terms": {"field": "status", "size": 100}}},
             }
+            if not include_deleted:
+                body["query"] = {
+                    "bool": {"must_not": [{"term": {"status": "deleted"}}]}
+                }
             response = await self.client.search(index=self._index_name, body=body)
             counts = {}
             total = 0
@@ -2716,7 +2740,10 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
             "query": {
                 "bool": {
                     "filter": [{"term": {"file_path": basename}}],
-                    "must_not": [{"term": {"metadata.is_duplicate": True}}],
+                    "must_not": [
+                        {"term": {"metadata.is_duplicate": True}},
+                        {"term": {"status": "deleted"}},
+                    ],
                 }
             },
             "size": 1,
@@ -2887,11 +2914,19 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
                 query: dict[str, Any] = {
                     "bool": {
                         "must": [{"term": {"content_hash": content_hash}}],
-                        "must_not": [{"ids": {"values": [exclude_doc_id]}}],
+                        "must_not": [
+                            {"ids": {"values": [exclude_doc_id]}},
+                            {"term": {"status": "deleted"}},
+                        ],
                     }
                 }
             else:
-                query = {"term": {"content_hash": content_hash}}
+                query = {
+                    "bool": {
+                        "must": [{"term": {"content_hash": content_hash}}],
+                        "must_not": [{"term": {"status": "deleted"}}],
+                    }
+                }
             body = {
                 "query": query,
                 "sort": [

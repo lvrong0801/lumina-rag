@@ -556,7 +556,11 @@ async def test_get_full_docs_by_ids_relaxed_skips_bad_doc_strict_raises():
 # resolve_doc_source_strict: conflict-aware typed resolution
 # ---------------------------------------------------------------------------
 
-_PRIMARY_QUERY = {"file_path": "a.txt", "metadata.is_duplicate": {"$ne": True}}
+_PRIMARY_QUERY = {
+    "file_path": "a.txt",
+    "status": {"$ne": "deleted"},
+    "metadata.is_duplicate": {"$ne": True},
+}
 
 
 async def test_resolve_source_absent_for_empty_and_sentinels():
@@ -820,9 +824,12 @@ async def test_get_doc_by_content_hash_exclude_doc_id_adds_ne_filter():
     assert data.find_cursors[0].sort_spec == [("created_at", 1), ("_id", 1)]
     assert data.find_cursors[0].limit_value == 1
 
-    # No exclusion → plain content_hash filter.
+    # No exclusion → plain content_hash filter (plus recycle-bin exclusion).
     await s.get_doc_by_content_hash("h")
-    assert data.find_queries[-1] == {"content_hash": "h"}
+    assert data.find_queries[-1] == {
+        "content_hash": "h",
+        "status": {"$ne": "deleted"},
+    }
 
 
 async def test_get_doc_by_content_hash_propagates_query_failure():
@@ -851,6 +858,7 @@ async def test_get_doc_by_content_hash_excludes_rows_pointing_at_the_excluded_id
     assert data.find_queries == [
         {
             "content_hash": "h",
+            "status": {"$ne": "deleted"},
             "_id": {"$ne": "doc-1"},
             "$nor": [
                 {

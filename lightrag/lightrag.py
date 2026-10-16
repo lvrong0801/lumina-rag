@@ -137,7 +137,7 @@ from lightrag.base import (
     OllamaServerInfos,
     QueryResult,
 )
-from lightrag.namespace import NameSpace
+from lightrag.namespace import NameSpace, sanitize_workspace_component
 from lightrag.query_validation import validate_query_not_empty, validate_rag_query
 from lightrag.chunker import chunking_by_token_size
 from lightrag.operate import (
@@ -710,6 +710,8 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
 
     workspace: str = field(default_factory=lambda: os.getenv("WORKSPACE", ""))
     """Workspace for data isolation. Defaults to empty string if WORKSPACE environment variable is not set."""
+
+    # ---
 
     # ---
     # TODO: Deprecated, use setup_logger in utils.py instead
@@ -1798,6 +1800,9 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
             )(self.embedding_func.func)
             # Use dataclasses.replace() to create a new instance, leaving the original unchanged
             self.embedding_func = replace(self.embedding_func, func=wrapped_func)
+
+        # Sanitize workspace before building backend storage namespaces
+        self.workspace = sanitize_workspace_component(self.workspace)
 
         # Initialize all storages
         self.key_string_value_json_storage_cls: type[BaseKVStorage] = get_storage_class(
@@ -5035,6 +5040,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
             user_prompt=param.user_prompt,
             disable_user_prompt_prefix=param.disable_user_prompt_prefix,
             enable_rerank=param.enable_rerank,
+            access_filter=param.access_filter,
         )
 
         query_result = None
@@ -5052,6 +5058,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                 hashing_kv=self.llm_response_cache,
                 system_prompt=None,
                 chunks_vdb=self.chunks_vdb,
+                doc_status=self.doc_status,
             )
         elif data_param.mode == "naive":
             logger.debug(f"[aquery_data] Using naive_query for mode: {data_param.mode}")
@@ -5063,6 +5070,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                 hashing_kv=self.llm_response_cache,
                 system_prompt=None,
                 text_chunks_db=self.text_chunks,
+                doc_status=self.doc_status,
             )
         elif data_param.mode == "bypass":
             logger.debug("[aquery_data] Using bypass mode")
@@ -5158,6 +5166,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                     system_prompt=system_prompt,
                     chunks_vdb=self.chunks_vdb,
                     progress_callback=progress_callback,
+                    doc_status=self.doc_status,
                 )
             elif param.mode == "naive":
                 query_result = await naive_query(
@@ -5169,6 +5178,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                     system_prompt=system_prompt,
                     text_chunks_db=self.text_chunks,
                     progress_callback=progress_callback,
+                    doc_status=self.doc_status,
                 )
             elif param.mode == "bypass":
                 # Bypass mode: directly use LLM without knowledge retrieval
@@ -6357,6 +6367,15 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                     if node_data:
                         if "id" not in node_data:
                             node_data["id"] = entity_name
+                        if "entity_id" not in node_data:
+                            # The classification loop below reads entity_id, so
+                            # backfill it from the verified graph node key
+                            # (mirrors the edge path's source/target backfill).
+                            # Without this, a node missing entity_id was silently
+                            # skipped (not deleted, not rebuilt) while the purge
+                            # still removed the recovery anchors and reported
+                            # success, stranding the entity as an orphan.
+                            node_data["entity_id"] = entity_name
                         affected_nodes.append(node_data)
 
             if candidate_relations:
@@ -6509,6 +6528,56 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                 ):
                     relationships_to_rebuild[edge_tuple] = remaining_sources
                     relation_chunk_updates[edge_tuple] = remaining_sources
+
+            # ---- Orphan sweep ----
+            # A "rebuild" object whose surviving sources ALL reference chunks
+            # that no longer exist in ``text_chunks`` is an orphan. This can
+            # happen when the object's attribution carries chunk ids from a
+            # different generation than the deleted document's ``chunks_list``
+            # (e.g. ``chunk-<md5>`` custom/overwrite chunks vs the document's
+            # ``doc-...-chunk-NNN`` ids). Without this check the object is
+            # rebuilt (kept) forever, stranding it in the graph with stale
+            # sources after every owning document has been deleted.
+            if entities_to_rebuild:
+                rem_entity_id_list = list(
+                    {cid for cids in entities_to_rebuild.values() for cid in cids}
+                )
+                if rem_entity_id_list:
+                    entity_rows = await self.text_chunks.get_by_ids(
+                        rem_entity_id_list
+                    )
+                    live_entity_ids = {
+                        cid
+                        for cid, row in zip(rem_entity_id_list, entity_rows)
+                        if row is not None
+                    }
+                    for name in list(entities_to_rebuild.keys()):
+                        cids = entities_to_rebuild[name]
+                        if cids and not any(c in live_entity_ids for c in cids):
+                            del entities_to_rebuild[name]
+                            entities_to_delete.add(name)
+                            entity_chunk_updates[name] = []
+            if relationships_to_rebuild:
+                rem_rel_id_list = list(
+                    {
+                        cid
+                        for cids in relationships_to_rebuild.values()
+                        for cid in cids
+                    }
+                )
+                if rem_rel_id_list:
+                    rel_rows = await self.text_chunks.get_by_ids(rem_rel_id_list)
+                    live_rel_ids = {
+                        cid
+                        for cid, row in zip(rem_rel_id_list, rel_rows)
+                        if row is not None
+                    }
+                    for pair in list(relationships_to_rebuild.keys()):
+                        cids = relationships_to_rebuild[pair]
+                        if cids and not any(c in live_rel_ids for c in cids):
+                            del relationships_to_rebuild[pair]
+                            relationships_to_delete.add(pair)
+                            relation_chunk_updates[pair] = []
 
             async with pipeline_status_lock:
                 log_message = (
@@ -6722,6 +6791,201 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
                     stage="persist_rebuilt_knowledge",
                 ) from e
 
+        return rebuild_report
+
+    async def aapply_incremental_replace(
+        self,
+        old_doc_id: str,
+        new_doc_id: str,
+    ) -> KGRebuildReport:
+        """Replace the old document's contribution to *shared* KG elements.
+
+        Used by incremental upload: the new document has already been inserted,
+        so its entities/relations were merged with the old document's. For every
+        entity/relation contributed to by BOTH documents, remove the old
+        document's chunk references and rebuild the description/vector from the
+        remaining chunks (the new document's chunks plus any other documents'),
+        so the new content replaces the old content. Entities/relations owned
+        only by the old document are left untouched (the old document is kept).
+        """
+        from lightrag.operate import rebuild_knowledge_from_chunks
+
+        old_doc_status = await self.doc_status.get_by_id(old_doc_id)
+        new_doc_status = await self.doc_status.get_by_id(new_doc_id)
+        if not old_doc_status:
+            raise ValueError(f"Old document {old_doc_id} not found")
+        if not new_doc_status:
+            raise ValueError(f"New document {new_doc_id} not found")
+
+        old_chunks = [c for c in (old_doc_status.get("chunks_list") or []) if c]
+        new_chunks = [c for c in (new_doc_status.get("chunks_list") or []) if c]
+        if not old_chunks or not new_chunks:
+            logger.warning(
+                "[incremental] %s -> %s: empty chunk list(s), nothing to replace",
+                old_doc_id,
+                new_doc_id,
+            )
+            return KGRebuildReport()
+
+        full_entities_storage = getattr(self, "full_entities", None)
+        full_relations_storage = getattr(self, "full_relations", None)
+        if full_entities_storage is None or full_relations_storage is None:
+            logger.warning(
+                "[incremental] %s -> %s: recovery anchors unavailable",
+                old_doc_id,
+                new_doc_id,
+            )
+            return KGRebuildReport()
+
+        # Shared entities/relations, resolved from the recovery anchors.
+        shared_entity_names: set[str] = set()
+        old_entities = await full_entities_storage.get_by_id(old_doc_id)
+        new_entities = await full_entities_storage.get_by_id(new_doc_id)
+        if old_entities and new_entities:
+            shared_entity_names = (
+                set(old_entities.get("entity_names") or [])
+                & set(new_entities.get("entity_names") or [])
+            )
+
+        shared_relation_pairs: set[tuple[str, str]] = set()
+        old_relations = await full_relations_storage.get_by_id(old_doc_id)
+        new_relations = await full_relations_storage.get_by_id(new_doc_id)
+        if old_relations and new_relations:
+            shared_relation_pairs = {
+                tuple(sorted(pair))
+                for pair in (old_relations.get("relation_pairs") or [])
+            } & {
+                tuple(sorted(pair))
+                for pair in (new_relations.get("relation_pairs") or [])
+            }
+
+        if not shared_entity_names and not shared_relation_pairs:
+            logger.info(
+                "[incremental] %s -> %s: no shared entities/relations",
+                old_doc_id,
+                new_doc_id,
+            )
+            return KGRebuildReport()
+
+        entities_to_rebuild: dict[str, list[str]] = {}
+        relationships_to_rebuild: dict[tuple[str, str], list[str]] = {}
+        entity_chunk_updates: dict[str, list[str]] = {}
+        relation_chunk_updates: dict[tuple[str, str], list[str]] = {}
+
+        if shared_entity_names:
+            nodes_dict = await self.chunk_entity_relation_graph.get_nodes_batch(
+                list(shared_entity_names)
+            )
+            for entity_name in shared_entity_names:
+                node_data = nodes_dict.get(entity_name)
+                if not node_data:
+                    continue
+                current_sources: list[str] = []
+                if self.entity_chunks:
+                    stored = await self.entity_chunks.get_by_id(entity_name)
+                    if stored and isinstance(stored, dict):
+                        current_sources = [
+                            c for c in stored.get("chunk_ids", []) if c
+                        ]
+                if not current_sources and node_data.get("source_id"):
+                    current_sources = [
+                        c
+                        for c in node_data["source_id"].split(GRAPH_FIELD_SEP)
+                        if c
+                    ]
+                if not current_sources:
+                    continue
+                remaining = subtract_source_ids(current_sources, old_chunks)
+                if not remaining or remaining == current_sources:
+                    continue
+                entities_to_rebuild[entity_name] = remaining
+                entity_chunk_updates[entity_name] = remaining
+
+        if shared_relation_pairs:
+            edge_pairs_dicts = [
+                {"src": p[0], "tgt": p[1]} for p in shared_relation_pairs
+            ]
+            edges_dict = await self.chunk_entity_relation_graph.get_edges_batch(
+                edge_pairs_dicts
+            )
+            for src, tgt in shared_relation_pairs:
+                edge_data = edges_dict.get((src, tgt))
+                if not edge_data:
+                    continue
+                current_sources: list[str] = []
+                if self.relation_chunks:
+                    stored = await self.relation_chunks.get_by_id(
+                        make_relation_chunk_key(src, tgt)
+                    )
+                    if stored and isinstance(stored, dict):
+                        current_sources = [
+                            c for c in stored.get("chunk_ids", []) if c
+                        ]
+                if not current_sources and edge_data.get("source_id"):
+                    current_sources = [
+                        c
+                        for c in edge_data["source_id"].split(GRAPH_FIELD_SEP)
+                        if c
+                    ]
+                if not current_sources:
+                    continue
+                remaining = subtract_source_ids(current_sources, old_chunks)
+                if not remaining or remaining == current_sources:
+                    continue
+                relationships_to_rebuild[(src, tgt)] = remaining
+                relation_chunk_updates[(src, tgt)] = remaining
+
+        if not entities_to_rebuild and not relationships_to_rebuild:
+            logger.info(
+                "[incremental] %s -> %s: no changed contributions",
+                old_doc_id,
+                new_doc_id,
+            )
+            return KGRebuildReport()
+
+        # Update chunk tracking (mirrors _purge_derived_kg_contributions).
+        current_time = int(time.time())
+        if entity_chunk_updates and self.entity_chunks:
+            await self.entity_chunks.upsert(
+                {
+                    name: {
+                        "chunk_ids": remaining,
+                        "count": len(remaining),
+                        "updated_at": current_time,
+                    }
+                    for name, remaining in entity_chunk_updates.items()
+                }
+            )
+        if relation_chunk_updates and self.relation_chunks:
+            relation_payload = {}
+            for (src, tgt), remaining in relation_chunk_updates.items():
+                tracked = [
+                    c for c in remaining if c not in RELATION_NO_EVIDENCE_SOURCE_IDS
+                ]
+                relation_payload[make_relation_chunk_key(src, tgt)] = {
+                    "chunk_ids": tracked,
+                    "count": len(tracked),
+                    "updated_at": current_time,
+                }
+            await self.relation_chunks.upsert(relation_payload)
+
+        await self._insert_done()
+
+        # Rebuild shared entities/relations from their remaining chunks.
+        rebuild_report = await rebuild_knowledge_from_chunks(
+            entities_to_rebuild=entities_to_rebuild,
+            relationships_to_rebuild=relationships_to_rebuild,
+            knowledge_graph_inst=self.chunk_entity_relation_graph,
+            entities_vdb=self.entities_vdb,
+            relationships_vdb=self.relationships_vdb,
+            text_chunks_storage=self.text_chunks,
+            llm_response_cache=self.llm_response_cache,
+            global_config=self._build_global_config(),
+            entity_chunks_storage=self.entity_chunks,
+            relation_chunks_storage=self.relation_chunks,
+            rebuild_policy="best_effort",
+        )
+        await self._insert_done()
         return rebuild_report
 
     async def adelete_by_doc_id(

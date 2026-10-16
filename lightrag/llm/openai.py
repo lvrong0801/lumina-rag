@@ -253,6 +253,14 @@ def create_openai_async_client(
             "User-Agent": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_8) LightRAG/{__api_version__}",
             "Content-Type": "application/json",
         }
+
+        # Some gateway proxies (e.g. unified API dashboard) return an HTML error
+        # page instead of JSON when they cannot parse the request path. The
+        # OpenAI SDK's StrictHTML casting silently turns that page into a `str`
+        # object — which crashes downstream `.choices` reasoning. We can avoid
+        # that entirely by sending an explicit `Accept: application/json` hint so
+        # the proxy knows we want a structured response.
+        default_headers["Accept"] = "application/json"
         dashscope_workspace_id = os.getenv("DASHSCOPE_WORKSPACE_ID", "").strip()
         if dashscope_workspace_id:
             default_headers["X-DashScope-Workspace"] = dashscope_workspace_id
@@ -270,6 +278,12 @@ def create_openai_async_client(
         }
 
         if base_url is not None:
+            # Normalize the URL (yanked from env vars too) so HTML error pages
+            # returned by gateway-style proxies surface immediately. A trailing
+            # `/` in the base_url makes the SDK append paths like `/models`
+            # directly onto the path portion of a host-only URL, breaking the
+            # Gateway's expected response format.
+            base_url = base_url.rstrip('/')
             merged_configs["base_url"] = base_url
         else:
             merged_configs["base_url"] = os.environ.get(
@@ -788,6 +802,31 @@ async def openai_complete_if_cache(
                 }
                 token_tracker.add_usage(token_counts)
 
+            # Defensive: some gateway proxies (e.g. Nginx with a JSON parse
+            # error page) return plain text/HTML instead of an OpenAI response.
+            # When that happens the SDK already saved the raw string into the
+            # ``response`` slot, so we truncate it so callers see a friendly
+            # message instead of AttributeError/ValueError.
+            try:
+                response_json = response.json() if hasattr(response, 'json') else None
+                logger.info('Response content type: %s (%s)', type(response).__name__, 'ok')
+                if isinstance(response_json, dict):
+                    logger.info('Response keys: %s', list(response_json.keys()))
+            except Exception as exc_info:
+                logger.debug('unable to parse as JSON response: %s %s', type(exc_info).__name__, exc_info)
+
+            # Defensive: some gateway proxies (e.g. Nginx with a JSON parse
+            # error page) return plain text/HTML instead of an OpenAI response.
+            if isinstance(response, str):
+                logger.error(
+                    "Gateway returned a bare string instead of a JSON OpenAI response "
+                    "body: %s",
+                    response[:120],
+                )
+                raise InvalidResponseError(
+                    "Gateway returned non-JSON content instead of an OpenAI chat response"
+                )
+
             if (
                 not response
                 or not response.choices
@@ -801,6 +840,14 @@ async def openai_complete_if_cache(
                 raise InvalidResponseError("Invalid response from OpenAI API")
 
             message = response.choices[0].message
+
+            if isinstance(message, str):
+                logger.warning(
+                    "Received bare string response from OpenAI API; treating as "
+                    "message content. Response preview: %s",
+                    message[:120],
+                )
+                content = message
 
             # Handle parsed responses (structured output via response_format)
             # When using beta.chat.completions.parse(), the response is in message.parsed

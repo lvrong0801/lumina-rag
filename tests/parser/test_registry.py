@@ -13,7 +13,7 @@ pytestmark = pytest.mark.offline
 
 def test_supported_engines_are_user_selectable_only():
     engines = registry.supported_parser_engines()
-    assert engines == frozenset({"native", "legacy", "mineru", "docling"})
+    assert engines == frozenset({"native", "legacy", "mineru", "docling", "image"})
     # Internal format handlers are registered but not user-selectable.
     assert "reuse" not in engines
     assert "passthrough" not in engines
@@ -23,6 +23,9 @@ def test_suffix_capabilities_lookup():
     assert "pdf" in registry.suffix_capabilities("mineru")
     assert registry.suffix_capabilities("native") == frozenset(
         {"docx", "md", "textpack"}
+    )
+    assert registry.suffix_capabilities("image") == frozenset(
+        {"png", "jpg", "jpeg", "webp", "gif"}
     )
     assert registry.suffix_capabilities("unknown-engine") == frozenset()
 

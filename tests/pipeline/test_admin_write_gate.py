@@ -1474,7 +1474,9 @@ def test_an_acquire_timeout_above_the_ceiling_does_not_warn(tmp_path, monkeypatc
         lambda message, *args, **kwargs: warned.append(str(message)),
     )
 
-    instance = _build_rag(tmp_path)
+    instance = _build_rag(
+        tmp_path, default_embedding_timeout=30
+    )  # pin the class default; a host .env override would move the ceiling
 
     # Asserted BEFORE touching the new attribute, so this case goes red on the
     # warning itself rather than on the field not existing yet.
@@ -1531,10 +1533,16 @@ def test_the_hold_ceiling_accessor_never_returns_none(tmp_path):
     resolved field is absent. Reaching ``loop.call_later`` with ``None`` fails
     as "delay must not be None", which names nothing an author could act on.
     """
-    resolved = _build_rag(tmp_path)
+    resolved = _build_rag(
+        tmp_path, default_embedding_timeout=30
+    )  # pin the class default; a host .env override would move the ceiling
     assert resolved._admin_write_hold_ceiling() == 180.0
 
     bare = LightRAG.__new__(LightRAG)
+    # Pin the class default on the bare rig: a host .env override is baked into
+    # the dataclass field default at import time, which would move the fallback
+    # derivation away from the 30s the rest of this test assumes.
+    bare.default_embedding_timeout = 30
     assert bare._admin_write_hold_ceiling() == 180.0
 
     resolved.admin_write_max_hold_seconds = None

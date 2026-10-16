@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable
 
 from lightrag.constants import (
     PARSER_ENGINE_DOCLING,
+    PARSER_ENGINE_IMAGE,
     PARSER_ENGINE_LEGACY,
     PARSER_ENGINE_MINERU,
     PARSER_ENGINE_NATIVE,
@@ -262,6 +263,12 @@ _DOCLING_SUFFIXES = frozenset(
     }
 )
 
+# Raster formats the standalone-image engine accepts. Bounded by what the
+# VLM analysis stage can feed a model (``_VLM_RASTER_EXTS`` in pipeline.py) —
+# anything else (bmp/tiff/jp2) would parse into a sidecar whose analysis is
+# then skipped, leaving a searchable nothing.
+IMAGE_ENGINE_SUFFIXES = frozenset({"png", "jpg", "jpeg", "webp", "gif"})
+
 
 _REGISTRY: dict[str, ParserSpec] = {
     PARSER_ENGINE_NATIVE: ParserSpec(
@@ -298,6 +305,12 @@ _REGISTRY: dict[str, ParserSpec] = {
         endpoint_configured=_env_endpoint_configured("DOCLING_ENDPOINT"),
         endpoint_requirement=lambda: "DOCLING_ENDPOINT",
         extra_suffixes_env="DOCLING_ADDITIONAL_SUFFIXES",
+    ),
+    PARSER_ENGINE_IMAGE: ParserSpec(
+        engine_name=PARSER_ENGINE_IMAGE,
+        impl="lightrag.parser.image.parser:NativeImageParser",
+        suffixes=IMAGE_ENGINE_SUFFIXES,
+        queue_group=PARSER_ENGINE_NATIVE,  # in-process; shares the native pool
     ),
     PARSER_ENGINE_REUSE: ParserSpec(
         engine_name=PARSER_ENGINE_REUSE,

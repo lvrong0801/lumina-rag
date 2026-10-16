@@ -847,7 +847,9 @@ def parse_args() -> argparse.Namespace:
     # Add environment variables that were previously read directly
     args.cors_origins = get_env_value("CORS_ORIGINS", "*")
     args.summary_language = get_env_value("SUMMARY_LANGUAGE", DEFAULT_SUMMARY_LANGUAGE)
-    args.whitelist_paths = get_env_value("WHITELIST_PATHS", "/health,/api/*")
+    args.whitelist_paths = get_env_value(
+        "WHITELIST_PATHS", "/health,/healthz,/readyz,/api/*"
+    )
 
     # Single authoritative switch for the interactive API documentation
     # surfaces (/docs, /docs/oauth2-redirect, /redoc, /openapi.json and the
@@ -878,6 +880,39 @@ def parse_args() -> argparse.Namespace:
     args.token_expire_hours = get_env_value("TOKEN_EXPIRE_HOURS", 48, float)
     args.guest_token_expire_hours = get_env_value("GUEST_TOKEN_EXPIRE_HOURS", 24, float)
     args.jwt_algorithm = get_env_value("JWT_ALGORITHM", "HS256")
+
+    # Enterprise RBAC (workspace-level authorization). RBAC_ENFORCE=false (the
+    # default) keeps today's behavior: authentication only, every authenticated
+    # caller reaches every workspace. When enabled, role/workspace checks are
+    # enforced for all JWT callers (X-API-Key callers are a service admin).
+    args.rbac_enforce = get_env_value("RBAC_ENFORCE", False, bool)
+    # Initial-admin bootstrap: used only when LIGHTRAG_USERS is empty and
+    # AUTH_ACCOUNTS provides nothing to seed from.
+    args.init_admin_username = get_env_value("INIT_ADMIN_USERNAME", "", str)
+    args.init_admin_password = get_env_value("INIT_ADMIN_PASSWORD", "", str)
+    # Operation audit trail (change operations only; see lightrag/api/audit.py).
+    args.audit_log_enabled = get_env_value("AUDIT_LOG_ENABLED", False, bool)
+    # Per-workspace LightRAG instance reclaim (memory bound for many tenants).
+    # Stateless semantics: with data fully in PG/vector stores the instance is
+    # a pure performance cache, so the cap is a process-local upper bound and
+    # an evicted instance can be rebuilt on the next request.
+    args.workspace_max_instances = get_env_value("WORKSPACE_MAX_INSTANCES", 4, int)
+    args.workspace_idle_timeout_seconds = get_env_value(
+        "WORKSPACE_IDLE_TIMEOUT_SECONDS", 300, int
+    )
+
+    # Redis coordination layer (P1, stateless API). REDIS_URL is the one-line
+    # connection string (redis://host:port/db); the granular REDIS_HOST / PORT /
+    # DB / PASSWORD variables are used when REDIS_URL is unset. When Redis is
+    # unreachable the server degrades to the in-process fallbacks (RBAC cache,
+    # pipeline-status mirror) and keeps working — these settings are never a
+    # startup hard dependency.
+    args.redis_url = get_env_value("REDIS_URL", "", str)
+    args.redis_host = get_env_value("REDIS_HOST", "localhost", str)
+    args.redis_port = get_env_value("REDIS_PORT", 6379, int)
+    args.redis_db = get_env_value("REDIS_DB", 0, int)
+    args.redis_password = get_env_value("REDIS_PASSWORD", "", str)
+    args.redis_prefix = get_env_value("REDIS_PREFIX", "lightrag:", str)
 
     # Token auto-renewal configuration (sliding window expiration)
     args.token_auto_renew = get_env_value("TOKEN_AUTO_RENEW", True, bool)

@@ -943,6 +943,13 @@ class NetworkXStorage(BaseGraphStorage):
             if graph.has_node(node):
                 graph.remove_node(node)
                 self._graph_dirty = True
+            else:
+                # Match delete_node: surface a key-drift (or already-removed)
+                # case instead of silently no-op'ing, so a purge that failed to
+                # delete a node is observable rather than stranding an orphan.
+                logger.warning(
+                    f"[{self.workspace}] Node {node} not found in the graph for deletion"
+                )
 
     async def remove_edges(self, edges: list[tuple[str, str]]):
         """Delete multiple edges from the graph.

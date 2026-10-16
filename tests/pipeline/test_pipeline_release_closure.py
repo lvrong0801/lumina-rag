@@ -389,6 +389,11 @@ def test_carry_over_keys_grouped_by_stage():
         "source_file",
         "parse_warnings",
         "chunk_opts",
+        # Owner isolation: metadata.owner is stamped at enqueue (upload/text
+        # endpoints) and read by reference_access on every query; it must
+        # survive every transition to PROCESSED or a private document silently
+        # becomes public.
+        "owner",
         # Non-authoritative registry observation, grouped with chunk options.
         "custom_chunker",
         "parse_start_time",

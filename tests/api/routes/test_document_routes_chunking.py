@@ -616,6 +616,7 @@ def _make_client(monkeypatch, addon_params=None, chunking_func=chunking_by_token
         chunking=None,
         resolved_chunking=None,
         admission_token=None,
+        owner=None,
     ):
         captured["texts"] = texts
         captured["file_sources"] = file_sources

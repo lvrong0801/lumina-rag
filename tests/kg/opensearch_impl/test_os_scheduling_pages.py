@@ -802,7 +802,8 @@ async def test_resolve_source_absent_on_zero_hits(global_config):
     assert body["sort"] == [{"__mirrored_id": {"order": "asc"}}]
     assert body["query"]["bool"]["filter"] == [{"term": {"file_path": "report.pdf"}}]
     assert body["query"]["bool"]["must_not"] == [
-        {"term": {"metadata.is_duplicate": True}}
+        {"term": {"metadata.is_duplicate": True}},
+        {"term": {"status": "deleted"}},
     ]
 
 
@@ -1163,7 +1164,8 @@ async def test_legacy_basename_query_excludes_duplicate_rows(global_config):
     body = client.search.call_args.kwargs["body"]
     assert body["query"]["bool"]["filter"] == [{"term": {"file_path": "report.pdf"}}]
     assert body["query"]["bool"]["must_not"] == [
-        {"term": {"metadata.is_duplicate": True}}
+        {"term": {"metadata.is_duplicate": True}},
+        {"term": {"status": "deleted"}},
     ]
 
 
@@ -1193,14 +1195,22 @@ async def test_get_doc_by_content_hash_exclude_doc_id_must_not_ids():
     assert result is not None and result[0] == "doc-2"
     body = s.client.search.call_args.kwargs["body"]
     assert body["query"]["bool"]["must"] == [{"term": {"content_hash": "h"}}]
-    assert body["query"]["bool"]["must_not"] == [{"ids": {"values": ["doc-1"]}}]
+    assert body["query"]["bool"]["must_not"] == [
+        {"ids": {"values": ["doc-1"]}},
+        {"term": {"status": "deleted"}},
+    ]
 
-    # No exclusion → plain term query.
+    # No exclusion → plain term query (plus recycle-bin exclusion).
     s.client.search.reset_mock()
     s.client.search.return_value = {"hits": {"hits": []}}
     await s.get_doc_by_content_hash("h")
     body = s.client.search.call_args.kwargs["body"]
-    assert body["query"] == {"term": {"content_hash": "h"}}
+    assert body["query"] == {
+        "bool": {
+            "must": [{"term": {"content_hash": "h"}}],
+            "must_not": [{"term": {"status": "deleted"}}],
+        }
+    }
 
 
 def _content_hash_storage() -> OpenSearchDocStatusStorage:

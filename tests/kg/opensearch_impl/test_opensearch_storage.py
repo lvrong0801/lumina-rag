@@ -2502,9 +2502,15 @@ class TestDocStatusStorage:
                 status_filter=DocStatus.PROCESSED, page=1, page_size=10
             )
             assert total == 3
-            # Verify count query used the status filter
+            # Verify count query used the status filter (plus recycle-bin
+            # exclusion: deleted rows are not part of the live listing).
             count_body = mock_client.count.call_args.kwargs.get("body", {})
-            assert count_body["query"] == {"term": {"status": "processed"}}
+            assert count_body["query"] == {
+                "bool": {
+                    "must": [{"term": {"status": "processed"}}],
+                    "must_not": [{"term": {"status": "deleted"}}],
+                }
+            }
 
     @pytest.mark.asyncio
     async def test_get_docs_paginated_with_status_filters(
@@ -2530,7 +2536,10 @@ class TestDocStatusStorage:
             assert docs == []
             count_body = mock_client.count.call_args.kwargs.get("body", {})
             assert count_body["query"] == {
-                "terms": {"status": ["analyzing", "parsing"]}
+                "bool": {
+                    "must": [{"terms": {"status": ["analyzing", "parsing"]}}],
+                    "must_not": [{"term": {"status": "deleted"}}],
+                }
             }
 
     @pytest.mark.asyncio
@@ -2604,11 +2613,15 @@ class TestDocStatusStorage:
                 "body"
             ) or mock_client.search.call_args[1].get("body", {})
             # Primary-only lookup: duplicate markers are excluded via must_not
-            # so filename dedup never matches a dup-* row.
+            # so filename dedup never matches a dup-* row; recycle-bin rows
+            # (status=deleted) are excluded the same way.
             assert body["query"] == {
                 "bool": {
                     "filter": [{"term": {"file_path": "report.pdf"}}],
-                    "must_not": [{"term": {"metadata.is_duplicate": True}}],
+                    "must_not": [
+                        {"term": {"metadata.is_duplicate": True}},
+                        {"term": {"status": "deleted"}},
+                    ],
                 }
             }
 
@@ -2678,7 +2691,12 @@ class TestDocStatusStorage:
             body = mock_client.search.call_args.kwargs.get(
                 "body"
             ) or mock_client.search.call_args[1].get("body", {})
-            assert body["query"] == {"term": {"content_hash": "abc123"}}
+            assert body["query"] == {
+                "bool": {
+                    "must": [{"term": {"content_hash": "abc123"}}],
+                    "must_not": [{"term": {"status": "deleted"}}],
+                }
+            }
 
     @pytest.mark.asyncio
     async def test_get_doc_by_content_hash_empty_short_circuits(

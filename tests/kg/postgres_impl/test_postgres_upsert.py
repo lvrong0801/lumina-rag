@@ -644,9 +644,9 @@ async def test_doc_status_upsert_includes_content_hash():
     row = rows[0]
     # Tuple layout: workspace, id, content_summary, content_length, chunks_count,
     # status, file_path, chunks_list, track_id, metadata, error_msg,
-    # content_hash, created_at, updated_at
+    # incremental_of, overwrote, content_hash, created_at, updated_at
     assert row[6] == "/uploads/a.[native-Fi].txt"
-    assert row[11] == "abc123"
+    assert row[13] == "abc123"
 
 
 @pytest.mark.asyncio

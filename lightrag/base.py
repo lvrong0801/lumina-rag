@@ -188,6 +188,20 @@ class QueryParam:
     instructions. Set this to True to take full control of the final text.
     """
 
+    # Server-side access filter (never part of the public request model). The
+    # API layer fills this from the authenticated account + RBAC permissions
+    # before query execution; retrieval pipelines use it to drop chunks of
+    # owner-isolated documents the requester may not cite BEFORE the answer is
+    # generated. Keyed by username/workspace so the LLM answer cache never
+    # leaks one tenant's context to another.
+    access_filter: dict | None = None
+    """Access-filter snapshot carried from the API layer into the retrieval
+    pipelines: ``{"username": str|None, "workspace": str, "perms": {...},
+    "role": str|None}``. When set, owner-isolated chunks the requester cannot
+    view are removed from the LLM context before generation, and the username
+    participates in the answer-cache key. SDK callers normally leave it None.
+    """
+
 
 @dataclass
 class StorageNameSpace(ABC):
@@ -1318,6 +1332,11 @@ class DocStatus(str, Enum):
     """Document processing status.
     Pipeline order: PENDING -> PARSING -> ANALYZING (optional) -> PROCESSING -> PROCESSED | FAILED.
     PREPROCESSED is deprecated, kept for backward compatibility.
+    DELETED is the recycle-bin state (soft delete): the row keeps its
+    vector/graph/KV data and ``metadata.deleted_at`` / ``metadata.deleted_by``
+    / ``metadata.original_status``; restore flips it back. Schedulers never
+    read it (their status lists exclude DELETED) and listing/counting exclude
+    it by default.
     """
 
     PENDING = "pending"
@@ -1327,6 +1346,7 @@ class DocStatus(str, Enum):
     PREPROCESSED = "preprocessed"  # Deprecated: use ANALYZING in new pipeline
     PROCESSED = "processed"
     FAILED = "failed"
+    DELETED = "deleted"
 
 
 @dataclass
@@ -1371,6 +1391,10 @@ class DocProcessingStatus:
     pending_parse records whose content has not been extracted yet.
     """
     """Internal field: indicates if multimodal processing is complete. Not shown in repr() but accessible for debugging."""
+    incremental_of: list[str] | None = None
+    """doc_ids of the documents this record incrementally updated (old documents retained)."""
+    overwrote: list[str] | None = None
+    """doc_ids of the documents this record overwrote (old documents deleted)."""
 
     def __post_init__(self):
         """
@@ -1622,6 +1646,8 @@ class DocStatusStorage(BaseKVStorage, ABC):
         page_size: int = 50,
         sort_field: str = "updated_at",
         sort_direction: str = "desc",
+        include_deleted: bool = False,
+        category: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
         """Get documents with pagination support
 
@@ -1632,14 +1658,24 @@ class DocStatusStorage(BaseKVStorage, ABC):
             page_size: Number of documents per page (10-200)
             sort_field: Field to sort by ('created_at', 'updated_at', 'id')
             sort_direction: Sort direction ('asc' or 'desc')
+            include_deleted: When False (default), recycle-bin rows
+                (``status == DELETED``) are excluded from both the page and the
+                total count. The recycle-bin listing passes True.
 
         Returns:
             Tuple of (list of (doc_id, DocProcessingStatus) tuples, total_count)
         """
 
     @abstractmethod
-    async def get_all_status_counts(self) -> dict[str, int]:
+    async def get_all_status_counts(
+        self, include_deleted: bool = False
+    ) -> dict[str, int]:
         """Get counts of documents in each status for all documents
+
+        Args:
+            include_deleted: When False (default), the ``deleted`` bucket is
+                omitted from the result entirely (recycle-bin rows are not part
+                of the live document counts). True includes it.
 
         Returns:
             Dictionary mapping status names to counts

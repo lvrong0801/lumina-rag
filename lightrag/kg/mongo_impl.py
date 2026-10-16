@@ -1046,6 +1046,8 @@ class MongoDocStatusStorage(DocStatusStorage):
         page_size: int = 50,
         sort_field: str = "updated_at",
         sort_direction: str = "desc",
+        include_deleted: bool = False,
+        category: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
         """Get documents with pagination support
 
@@ -1055,6 +1057,9 @@ class MongoDocStatusStorage(DocStatusStorage):
             page_size: Number of documents per page (10-200)
             sort_field: Field to sort by ('created_at', 'updated_at', '_id')
             sort_direction: Sort direction ('asc' or 'desc')
+            include_deleted: When False (default), recycle-bin rows
+                (``status == DELETED``) are excluded from both the page and the
+                total count.
 
         Returns:
             Tuple of (list of (doc_id, DocProcessingStatus) tuples, total_count)
@@ -1082,6 +1087,13 @@ class MongoDocStatusStorage(DocStatusStorage):
         query_filter = {}
         if status_filter_values is not None:
             query_filter["status"] = {"$in": sorted(status_filter_values)}
+        # Recycle-bin rows are not part of the live document listing unless the
+        # caller explicitly asks for them.
+        if not include_deleted:
+            query_filter["status"] = {
+                **({"$in": sorted(status_filter_values)} if status_filter_values is not None else {}),
+                "$ne": "deleted",
+            }
 
         # Get total count
         total_count = await self._data.count_documents(query_filter)
@@ -1131,13 +1143,24 @@ class MongoDocStatusStorage(DocStatusStorage):
 
         return documents, total_count
 
-    async def get_all_status_counts(self) -> dict[str, int]:
+    async def get_all_status_counts(
+        self, include_deleted: bool = False
+    ) -> dict[str, int]:
         """Get counts of documents in each status for all documents
+
+        Args:
+            include_deleted: When False (default), the ``deleted`` bucket is
+                omitted from the result entirely (recycle-bin rows are not part
+                of the live document counts).
 
         Returns:
             Dictionary mapping status names to counts, including 'all' field
         """
         pipeline = [{"$group": {"_id": "$status", "count": {"$sum": 1}}}]
+        if not include_deleted:
+            pipeline.insert(
+                0, {"$match": {"status": {"$ne": "deleted"}}}
+            )
         cursor = await self._data.aggregate(pipeline, allowDiskUse=True)
         result = await cursor.to_list()
 
@@ -1185,7 +1208,11 @@ class MongoDocStatusStorage(DocStatusStorage):
             return None
         try:
             doc = await self._data.find_one(
-                {"file_path": basename, "metadata.is_duplicate": {"$ne": True}}
+                {
+                    "file_path": basename,
+                    "status": {"$ne": "deleted"},
+                    "metadata.is_duplicate": {"$ne": True},
+                }
             )
         except PyMongoError as e:
             logger.error(f"[{self.workspace}] Error in get_doc_by_file_basename: {e}")
@@ -1215,6 +1242,7 @@ class MongoDocStatusStorage(DocStatusStorage):
 
         query = {
             "file_path": canonical_source_key,
+            "status": {"$ne": "deleted"},
             "metadata.is_duplicate": {"$ne": True},
         }
         cursor = self._data.find(query).limit(2)
@@ -1263,7 +1291,10 @@ class MongoDocStatusStorage(DocStatusStorage):
         if not content_hash:
             return None
 
-        query: dict[str, Any] = {"content_hash": content_hash}
+        query: dict[str, Any] = {
+            "content_hash": content_hash,
+            "status": {"$ne": "deleted"},
+        }
         if exclude_doc_id is not None:
             query["_id"] = {"$ne": exclude_doc_id}
             query["$nor"] = [
