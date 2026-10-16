@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
+import { useTranslation } from 'react-i18next'
 import { Loader2, Plus, Trash2, KeyRound, ShieldCheck } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
@@ -63,6 +64,7 @@ interface Props {
 const toLabel = (name: string) => (name === '' ? 'default' : name)
 
 export default function AdminUserDialog({ open, onOpenChange }: Props) {
+  const { t } = useTranslation()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(false)
 
@@ -86,11 +88,11 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       setUsers(await listUsers())
     } catch (err) {
       console.error('[AdminUserDialog] load users failed:', err)
-      toast.error('Failed to load users')
+      toast.error(t('admin.loadUsersError'))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     if (!open) return
@@ -105,28 +107,28 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       setPermissions(await listUserPermissions(user.username))
     } catch (err) {
       console.error('[AdminUserDialog] load permissions failed:', err)
-      toast.error('Failed to load permissions')
+      toast.error(t('admin.loadPermsError'))
     } finally {
       setPermLoading(false)
     }
-  }, [])
+  }, [t])
 
   const handleCreate = async () => {
     const username = newUsername.trim()
     if (!username || !newPassword) {
-      toast.error('Username and password are required.')
+      toast.error(t('admin.required'))
       return
     }
     try {
       setCreating(true)
       await createUser({ username, password: newPassword, role: newRole })
-      toast.success(`User "${username}" created.`)
+      toast.success(t('admin.createSuccess', { username }))
       setNewUsername('')
       setNewPassword('')
       await loadUsers()
     } catch (err) {
       console.error('[AdminUserDialog] create failed:', err)
-      toast.error('Failed to create user.')
+      toast.error(t('admin.createError'))
     } finally {
       setCreating(false)
     }
@@ -135,22 +137,22 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
   const handleUpdate = async (user: AdminUser, patch: { role?: string; enabled?: boolean }) => {
     try {
       await updateUser(user.username, patch)
-      toast.success(`User "${user.username}" updated.`)
+      toast.success(t('admin.updateSuccess', { username: user.username }))
       await loadUsers()
     } catch (err) {
       console.error('[AdminUserDialog] update failed:', err)
-      toast.error('Failed to update user.')
+      toast.error(t('admin.updateError'))
     }
   }
 
   const handleDelete = async (user: AdminUser) => {
     try {
       await deleteUser(user.username)
-      toast.success(`User "${user.username}" deleted.`)
+      toast.success(t('admin.deleteSuccess', { username: user.username }))
       await loadUsers()
     } catch (err) {
       console.error('[AdminUserDialog] delete failed:', err)
-      toast.error('Failed to delete user.')
+      toast.error(t('admin.deleteError'))
     }
   }
 
@@ -165,12 +167,12 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
     try {
       setPermBusy(true)
       await setUserPermission(permUser.username, ws, newPermLevel)
-      toast.success(`Granted ${newPermLevel} on "${toLabel(ws)}".`)
+      toast.success(t('admin.grantSuccess', { name: toLabel(ws), level: newPermLevel }))
       setNewPermWs('')
       await loadPermissions(permUser)
     } catch (err) {
       console.error('[AdminUserDialog] set permission failed:', err)
-      toast.error('Failed to set permission.')
+      toast.error(t('admin.grantError'))
     } finally {
       setPermBusy(false)
     }
@@ -181,11 +183,11 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
     try {
       setPermBusy(true)
       await deleteUserPermission(permUser.username, workspace)
-      toast.success(`Revoked permission on "${toLabel(workspace)}".`)
+      toast.success(t('admin.revokeSuccess', { name: toLabel(workspace) }))
       await loadPermissions(permUser)
     } catch (err) {
       console.error('[AdminUserDialog] delete permission failed:', err)
-      toast.error('Failed to revoke permission.')
+      toast.error(t('admin.revokeError'))
     } finally {
       setPermBusy(false)
     }
@@ -196,10 +198,9 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>User Administration</DialogTitle>
+            <DialogTitle>{t('admin.title')}</DialogTitle>
             <DialogDescription>
-              Manage accounts, roles and workspace grants. Admins manage
-              everything; managers/viewers are read-mostly by role.
+              {t('admin.description')}
             </DialogDescription>
           </DialogHeader>
 
@@ -207,12 +208,12 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
             {/* Create user */}
             <div className="rounded-md border p-3">
               <div className="mb-2 flex items-center gap-2 text-sm font-medium">
-                <Plus className="h-4 w-4" /> Create user
+                <Plus className="h-4 w-4" /> {t('admin.createUser')}
               </div>
               <div className="flex flex-wrap items-end gap-2">
                 <div className="min-w-[140px] flex-1">
                   <Input
-                    placeholder="username"
+                    placeholder={t('admin.usernamePlaceholder')}
                     value={newUsername}
                     onChange={(e) => setNewUsername(e.target.value)}
                   />
@@ -220,7 +221,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                 <div className="min-w-[140px] flex-1">
                   <Input
                     type="password"
-                    placeholder="password"
+                    placeholder={t('admin.passwordPlaceholder')}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
@@ -239,7 +240,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                   </Select>
                 </div>
                 <Button onClick={handleCreate} disabled={creating}>
-                  {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create'}
+                  {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.create')}
                 </Button>
               </div>
             </div>
@@ -249,10 +250,10 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Username</TableHead>
-                    <TableHead>Role</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
+                    <TableHead>{t('admin.colUsername')}</TableHead>
+                    <TableHead>{t('admin.colRole')}</TableHead>
+                    <TableHead>{t('admin.colStatus')}</TableHead>
+                    <TableHead className="text-right">{t('admin.colActions')}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -265,7 +266,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                   ) : users.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={4} className="py-6 text-center text-sm text-gray-500">
-                        No users yet — create the first one above (or via AUTH_ACCOUNTS / INIT_ADMIN_*).
+                        {t('admin.empty')}
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -279,7 +280,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                         </TableCell>
                         <TableCell>
                           <StatusBadge status={user.enabled ? 'completed' : 'failed'}>
-                            {user.enabled ? 'enabled' : 'disabled'}
+                            {user.enabled ? t('admin.enabled') : t('admin.disabled')}
                           </StatusBadge>
                         </TableCell>
                         <TableCell className="text-right">
@@ -287,21 +288,21 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                             <Button
                               variant="outline" size="sm"
                               onClick={() => openPermissions(user)}
-                              tooltip="Workspace permissions"
+                              tooltip={t('admin.permTooltip')}
                             >
                               <KeyRound className="h-3.5 w-3.5" />
                             </Button>
                             <Button
                               variant="outline" size="sm"
                               onClick={() => handleUpdate(user, { enabled: !user.enabled })}
-                              tooltip={user.enabled ? 'Disable' : 'Enable'}
+                              tooltip={user.enabled ? t('admin.disable') : t('admin.enable')}
                             >
                               <ShieldCheck className="h-3.5 w-3.5" />
                             </Button>
                             <Button
                               variant="outline" size="sm"
                               onClick={() => handleDelete(user)}
-                              tooltip="Delete user"
+                              tooltip={t('admin.deleteUser')}
                             >
                               <Trash2 className="h-3.5 w-3.5 text-red-500" />
                             </Button>
@@ -317,7 +318,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
 
           <DialogFooter>
             <Button variant="outline" onClick={() => onOpenChange(false)}>
-              Close
+              {t('common.close')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -328,11 +329,10 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>
-              Permissions for {permUser ? `"${permUser.username}"` : ''}
+              {t('admin.permTitle', { username: permUser?.username ?? '' })}
             </DialogTitle>
             <DialogDescription>
-              Workspace grants: read / write / admin. Empty workspace name
-              means the default workspace.
+              {t('admin.permDesc')}
             </DialogDescription>
           </DialogHeader>
 
@@ -340,7 +340,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
             <div className="flex flex-wrap items-end gap-2">
               <div className="min-w-[120px] flex-1">
                 <Input
-                  placeholder="workspace (empty = default)"
+                  placeholder={t('admin.wsPlaceholder')}
                   value={newPermWs}
                   onChange={(e) => setNewPermWs(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleAddPermission() }}
@@ -359,7 +359,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                 </Select>
               </div>
               <Button onClick={handleAddPermission} disabled={permBusy}>
-                Grant
+                {t('admin.grant')}
               </Button>
             </div>
 
@@ -367,8 +367,8 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Workspace</TableHead>
-                    <TableHead>Level</TableHead>
+                    <TableHead>{t('admin.colWorkspace')}</TableHead>
+                    <TableHead>{t('admin.colLevel')}</TableHead>
                     <TableHead className="w-10"></TableHead>
                   </TableRow>
                 </TableHeader>
@@ -382,7 +382,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                   ) : permissions.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={3} className="py-4 text-center text-sm text-gray-500">
-                        No workspace grants.
+                        {t('admin.noGrants')}
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -399,7 +399,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
                             variant="ghost" size="sm"
                             onClick={() => handleDeletePermission(perm.workspace)}
                             disabled={permBusy}
-                            tooltip="Revoke"
+                            tooltip={t('admin.revoke')}
                           >
                             <Trash2 className="h-3.5 w-3.5 text-red-500" />
                           </Button>

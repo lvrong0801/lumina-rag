@@ -54,9 +54,9 @@ export default function CategorySidebar({ selectedCategory, onSelect, refreshTri
       setShowCreate(false)
       setNewName('')
       load()
-      toast.success(`Category "${name}" created`)
+      toast.success(t('categories.created', { name }))
     } catch (e: any) {
-      toast.error(e.message || 'Failed to create category')
+      toast.error(e.message || t('categories.createError'))
     }
   }
 
@@ -69,21 +69,21 @@ export default function CategorySidebar({ selectedCategory, onSelect, refreshTri
       setRenameValue('')
       if (selectedCategory === oldName) onSelect(newN)
       load()
-      toast.success('Category renamed')
+      toast.success(t('categories.renamed'))
     } catch (e: any) {
-      toast.error(e.message || 'Failed to rename')
+      toast.error(e.message || t('categories.renameError'))
     }
   }
 
   const handleDelete = async (name: string) => {
-    if (!confirm(`Delete category "${name}"? Documents in it become uncategorized.`)) return
+    if (!confirm(t('categories.confirmDelete', { name }))) return
     try {
       await deleteCategory(name)
       if (selectedCategory === name) onSelect(null)
       load()
-      toast.success('Category deleted')
+      toast.success(t('categories.deleted'))
     } catch (e: any) {
-      toast.error(e.message || 'Failed to delete')
+      toast.error(e.message || t('categories.deleteError'))
     }
   }
 
@@ -273,8 +273,8 @@ export default function CategorySidebar({ selectedCategory, onSelect, refreshTri
             onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') handleCreate() }}
           />
           <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setShowCreate(false)}>Cancel</Button>
-            <Button size="sm" onClick={handleCreate}>Create</Button>
+            <Button variant="outline" size="sm" onClick={() => setShowCreate(false)}>{t('common.cancel')}</Button>
+            <Button size="sm" onClick={handleCreate}>{t('common.create')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

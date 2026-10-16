@@ -13,6 +13,7 @@
  */
 import React, { useState, useEffect, useCallback } from 'react'
 import { toast } from 'sonner'
+import { useTranslation } from 'react-i18next'
 import { Plus, Trash2, FolderOpen, Loader2 } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
@@ -69,11 +70,21 @@ const NAME_RE = /^[a-zA-Z0-9_-]+$/
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange }) => {
+  const { t } = useTranslation()
   const currentWorkspace = useSettingsStore.use.currentWorkspace()
   const setCurrentWorkspace = useSettingsStore.use.setCurrentWorkspace()
   const setLevels = useWorkspaceAccess.use.setLevels()
+  const levels = useWorkspaceAccess.use.levels()
   const { role } = useAuthStore()
   const canManage = canManageWorkspaces(role)
+
+  // Access badge styles keyed by level — mirrored in the dropdown items below.
+  const LEVEL_BADGE: Record<string, string> = {
+    read: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+    write: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
+    admin: 'bg-primary/10 text-primary'
+  }
+  const currentLevel = levels[currentWorkspace]
 
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([])
   const [loadingList, setLoadingList] = useState(false)
@@ -105,11 +116,11 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
       setLevels(levels)
     } catch (err) {
       console.error('[WorkspaceSelector] Failed to load workspaces:', err)
-      toast.error('Failed to load workspaces')
+      toast.error(t('workspaces.loadError'))
     } finally {
       setLoadingList(false)
     }
-  }, [setLevels])
+  }, [setLevels, t])
 
   useEffect(() => {
     // Defer past the synchronous effect body (react-hooks/set-state-in-effect).
@@ -133,17 +144,17 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
   const handleCreate = async () => {
     const trimmed = newName.trim()
     if (!trimmed) {
-      toast.error('Workspace name cannot be empty.')
+      toast.error(t('workspaces.nameEmpty'))
       return
     }
     if (!NAME_RE.test(trimmed)) {
-      toast.error('Name may only contain letters, digits, underscores or hyphens.')
+      toast.error(t('workspaces.nameInvalid'))
       return
     }
     try {
       setCreating(true)
       await createWorkspace(trimmed)
-      toast.success(`Workspace "${trimmed}" created.`)
+      toast.success(t('workspaces.createSuccess', { name: trimmed }))
       setNewName('')
       setCreateOpen(false)
       await fetchWorkspaces()
@@ -152,7 +163,7 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
       onWorkspaceChange?.()
     } catch (err) {
       console.error('[WorkspaceSelector] Create failed:', err)
-      toast.error('Failed to create workspace.')
+      toast.error(t('workspaces.createError'))
     } finally {
       setCreating(false)
     }
@@ -164,7 +175,7 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
     try {
       setDeleting(true)
       await deleteWorkspace(currentWorkspace)
-      toast.success(`Workspace "${toLabel(currentWorkspace)}" deleted.`)
+      toast.success(t('workspaces.deleteSuccess', { name: toLabel(currentWorkspace) }))
       setDeleteOpen(false)
       // Fall back to default workspace
       setCurrentWorkspace('')
@@ -172,7 +183,7 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
       onWorkspaceChange?.()
     } catch (err) {
       console.error('[WorkspaceSelector] Delete failed:', err)
-      toast.error('Failed to delete workspace.')
+      toast.error(t('workspaces.deleteError'))
     } finally {
       setDeleting(false)
     }
@@ -187,12 +198,29 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
       {/* Workspace selector — shrinkable so a long workspace name doesn't push the header wider */}
       <Select value={selectValue} onValueChange={handleSelect} disabled={loadingList}>
         <SelectTrigger className="h-8 w-[160px] max-w-[240px] text-sm">
-          <div className="flex items-center gap-1.5 min-w-0">
+          {/* Layout contract for the 160px trigger: the wrapper is flex-1 +
+              overflow-hidden so NOTHING can reach the chevron; when space runs
+              out the NAME truncates and the badge stays pinned (badge is the
+              higher-value information). Explicit SelectValue children are used
+              because a bare one would clone the item's own badge row in here
+              without these constraints, which is what overflowed the chevron. */}
+          <div className="flex flex-1 items-center gap-1.5 min-w-[28px] overflow-hidden">
             {loadingList
               ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
               : <FolderOpen className="h-3.5 w-3.5 shrink-0" />
             }
-            <SelectValue />
+            <SelectValue asChild>
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate">{toLabel(currentWorkspace)}</span>
+                {currentLevel && LEVEL_BADGE[currentLevel] && (
+                  <span
+                    className={`shrink-0 rounded px-1 text-[10px] leading-3 ${LEVEL_BADGE[currentLevel]}`}
+                  >
+                    {currentLevel}
+                  </span>
+                )}
+              </span>
+            </SelectValue>
           </div>
         </SelectTrigger>
         <SelectContent>
@@ -201,19 +229,11 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
               value={ws.name === '' ? DEFAULT_VALUE : ws.name}>
               <span className="flex items-center gap-1.5 min-w-0">
                 <span className="truncate font-medium">{toLabel(ws.name)}</span>
-                {ws.access_level === 'read' && (
-                  <span className="shrink-0 rounded bg-amber-100 px-1 text-[10px] leading-3 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
-                    read
-                  </span>
-                )}
-                {ws.access_level === 'write' && (
-                  <span className="shrink-0 rounded bg-sky-100 px-1 text-[10px] leading-3 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
-                    write
-                  </span>
-                )}
-                {ws.access_level === 'admin' && (
-                  <span className="shrink-0 rounded bg-primary/10 px-1 text-[10px] leading-3 text-primary">
-                    admin
+                {ws.access_level && LEVEL_BADGE[ws.access_level] && (
+                  <span
+                    className={`shrink-0 rounded px-1 text-[10px] leading-3 ${LEVEL_BADGE[ws.access_level]}`}
+                  >
+                    {ws.access_level}
                   </span>
                 )}
               </span>
@@ -227,19 +247,19 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
         <>
           <Dialog open={createOpen} onOpenChange={(o) => { setCreateOpen(o); if (!o) setNewName('') }}>
             <DialogTrigger asChild>
-              <Button variant="outline" size="sm" className="h-8 w-8 p-0" tooltip="New workspace">
+              <Button variant="outline" size="sm" className="h-8 w-8 p-0" tooltip={t('workspaces.new')}>
                 <Plus className="h-4 w-4" />
               </Button>
             </DialogTrigger>
             <DialogContent className="max-w-sm">
               <DialogHeader>
-                <DialogTitle>Create workspace</DialogTitle>
+                <DialogTitle>{t('workspaces.createTitle')}</DialogTitle>
                 <DialogDescription>
-                  Letters, digits, underscores and hyphens only.
+                  {t('workspaces.createDesc')}
                 </DialogDescription>
               </DialogHeader>
               <Input
-                placeholder="workspace-name"
+                placeholder={t('workspaces.namePlaceholder')}
                 value={newName}
                 autoFocus
                 onChange={(e) => setNewName(e.target.value)}
@@ -247,10 +267,10 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
               />
               <DialogFooter>
                 <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
-                  Cancel
+                  {t('common.cancel')}
                 </Button>
                 <Button onClick={handleCreate} disabled={creating}>
-                  {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create'}
+                  {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.create')}
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -262,25 +282,24 @@ const WorkspaceSelector: React.FC<WorkspaceSelectorProps> = ({ onWorkspaceChange
               <Button
                 variant="outline" size="sm" className="h-8 w-8 p-0"
                 disabled={isDefault}
-                tooltip={isDefault ? 'Cannot delete default workspace' : `Delete "${toLabel(currentWorkspace)}"`}
+                tooltip={isDefault ? t('workspaces.cannotDeleteDefault') : t('workspaces.deleteTooltip', { name: toLabel(currentWorkspace) })}
               >
                 <Trash2 className="h-4 w-4" />
               </Button>
             </DialogTrigger>
             <DialogContent className="max-w-sm">
               <DialogHeader>
-                <DialogTitle>Delete workspace</DialogTitle>
+                <DialogTitle>{t('workspaces.deleteTitle')}</DialogTitle>
                 <DialogDescription>
-                  All data in workspace <strong>{toLabel(currentWorkspace)}</strong> will be permanently deleted.
-                  This action cannot be undone.
+                  {t('workspaces.deleteDesc', { name: toLabel(currentWorkspace) })}
                 </DialogDescription>
               </DialogHeader>
               <DialogFooter>
                 <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
-                  Cancel
+                  {t('common.cancel')}
                 </Button>
                 <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
-                  {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Delete'}
+                  {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.delete')}
                 </Button>
               </DialogFooter>
             </DialogContent>
