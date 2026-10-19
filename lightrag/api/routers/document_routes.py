@@ -114,7 +114,10 @@ from lightrag.parser.routing import (
     canonicalize_parser_hinted_basename,
     chunk_strategy_key,
     encode_parse_engine,
+    filename_parser_directives,
+    normalize_parser_engine,
     parse_process_options,
+    parser_suffix,
     resolve_chunk_options,
     resolve_parser_directives,
 )
@@ -124,7 +127,12 @@ from lightrag.utils import (
     validate_file_path_security,
 )
 from lightrag.kg.shared_storage import append_pipeline_history
-from lightrag.utils_pipeline import count_active_documents, read_source_file_basename
+from lightrag.utils_pipeline import (
+    ENABLE_MULTIMODAL_METADATA_KEY,
+    SUMMARY_LANGUAGE_METADATA_KEY,
+    count_active_documents,
+    read_source_file_basename,
+)
 from lightrag.api.admission import adopt_admission_ticket
 from lightrag.api.utils_api import get_combined_auth_dependency, authorize
 from ..config import global_args
@@ -2451,6 +2459,8 @@ async def pipeline_enqueue_file(
     known_file_size: int | None = None,
     owner: str | None = None,
     doc_status_extra: dict[str, Any] | None = None,
+    chunk_options: dict | None = None,
+    parse_engine_override: str | None = None,
 ) -> tuple[bool, str]:
     """Add a file to the queue for processing
 
@@ -2474,6 +2484,17 @@ async def pipeline_enqueue_file(
             ``metadata.owner`` on the doc_status row (owner-isolation
             reference filtering).  ``None`` (scan / SDK path) marks the
             document as shared: it inherits the workspace's grants.
+        chunk_options: caller-supplied chunk-options snapshot (already merged
+            and validated).  When provided, the filename-hint overlay below is
+            skipped: ``/documents/upload`` merges hint params over ADVANCED-
+            SETTINGS form params itself so an invalid combination is a
+            synchronous HTTP 400, not an async error document.
+        parse_engine_override: fully validated engine name from
+            ``/documents/upload``'s advanced settings, applied over the
+            filename-directive engine.  The caller passes ``None`` whenever
+            the filename carries an explicit hint — per-file intent outranks
+            the batch-level form choice — so this parameter is applied
+            blindly here.
     Returns:
         tuple: (success: bool, track_id: str)
     """
@@ -2530,7 +2551,7 @@ async def pipeline_enqueue_file(
             )
             return False, track_id
 
-        extraction_engine = directives.engine
+        extraction_engine = parse_engine_override or directives.engine
         process_options = directives.process_options
         api_process_options = process_options or PROCESS_OPTION_CHUNK_FIXED
 
@@ -2538,9 +2559,15 @@ async def pipeline_enqueue_file(
         # LIGHTRAG_PARSER rule) onto the active strategy's chunk_options so the
         # parse worker chunks this document with them. Absent params keep the
         # legacy path (chunk_options built at enqueue time from addon_params).
-        hint_chunk_options = None
+        # A caller-supplied snapshot (upload advanced settings) arrives already
+        # merged+validated and replaces this overlay.
+        hint_chunk_options = chunk_options
         active_strategy = parse_process_options(api_process_options).chunking
-        hint_chunk_params = directives.chunk_params.get(active_strategy)
+        hint_chunk_params = (
+            directives.chunk_params.get(active_strategy)
+            if hint_chunk_options is None
+            else None
+        )
         if hint_chunk_params:
             try:
                 strategy_key = chunk_strategy_key(api_process_options)
@@ -2574,8 +2601,11 @@ async def pipeline_enqueue_file(
         # Encode any per-file engine params into the parse_engine field
         # (e.g. "mineru(page_range=1-3,language=en)") so they ride the existing
         # persisted column to the parse worker. Bare engine when there are none.
+        # An advanced-settings engine override carries no params — the hinted
+        # params belong to the hinted engine and must not cross engines.
         parse_engine_field = encode_parse_engine(
-            extraction_engine, directives.engine_params
+            extraction_engine,
+            {} if parse_engine_override is not None else directives.engine_params,
         )
         try:
             enqueue_kwargs = {
@@ -2660,6 +2690,8 @@ async def pipeline_index_file(
     admission_token: str | None = None,
     owner: str | None = None,
     doc_status_extra: dict[str, Any] | None = None,
+    chunk_options: dict | None = None,
+    parse_engine_override: str | None = None,
 ):
     """Index a file with track_id
 
@@ -2674,6 +2706,10 @@ async def pipeline_index_file(
             :func:`_release_admission_after_enqueue`.
         owner: uploading account username for ``metadata.owner`` (see
             :func:`pipeline_enqueue_file`).
+        chunk_options: caller-merged chunk-options snapshot, forwarded verbatim
+            to :func:`pipeline_enqueue_file`.
+        parse_engine_override: validated advanced-settings engine override,
+            forwarded verbatim to :func:`pipeline_enqueue_file`.
     """
     try:
         success, _ = await pipeline_enqueue_file(
@@ -2683,6 +2719,8 @@ async def pipeline_index_file(
             admission_token=admission_token,
             owner=owner,
             doc_status_extra=doc_status_extra,
+            chunk_options=chunk_options,
+            parse_engine_override=parse_engine_override,
         )
         # The enqueue is over (its writes and, on failure, its error-document
         # writes are all behind us), so the reservation has nothing left to
@@ -5474,6 +5512,11 @@ def create_document_routes(
         file: UploadFile = File(...),
         mode: str = Form("new"),
         target_doc_ids: list[str] | None = Form(None),
+        chunk_size: int | None = Form(None),
+        chunk_overlap_size: int | None = Form(None),
+        summary_language: str | None = Form(None),
+        enable_multimodal: bool | None = Form(None),
+        parse_engine: str | None = Form(None),
         http_request: Request = None,
         rag=Depends(get_rag_dependency),
         doc_manager=Depends(get_doc_manager_dependency),
@@ -5537,6 +5580,27 @@ def create_document_routes(
           are accepted concurrently and the running pipeline picks them
           up via the ingress mailbox.
 
+        **Per-document processing overrides (advanced settings):**
+        - ``chunk_size`` (int, tokens): overrides the active chunking strategy's
+          ``chunk_token_size`` for this document. Merged over any filename-hint
+          params and validated synchronously (HTTP 400 on an invalid effective
+          ``chunk_overlap_token_size >= chunk_token_size``).
+        - ``chunk_overlap_size`` (int, tokens, >= 0): overrides
+          ``chunk_overlap_token_size`` likewise.
+        - ``summary_language`` (str): pins the summary / analysis language for
+          this document (stored as ``metadata.summary_language``, honoured by
+          every attempt including retries).
+        - ``enable_multimodal`` (bool): flips ``VLM_PROCESS_ENABLE`` for this
+          document only (stored as ``metadata.enable_multimodal``). Modality
+          selection (i/t/e) still comes from the filename's process options.
+        - ``parse_engine`` (str): pins the parser engine for this upload
+          (e.g. ``docling`` / ``pymupdf4llm``). Validated synchronously:
+          unknown engine, unavailable engine (missing endpoint / package),
+          or an engine that cannot read the file's suffix all return HTTP
+          400. An explicit filename ``[engine]`` hint on the file outranks
+          this form value — per-file intent beats batch-level intent.
+        Omit a field to keep the server default.
+
         Args:
             managed_tasks: injected managed background-task set
                 (see get_managed_background_tasks) — the reservation-holding work
@@ -5548,11 +5612,13 @@ def create_document_routes(
                 - status="success": File accepted and queued for processing
 
         Raises:
-            HTTPException: 400 unsupported file type or malformed filename
-                hint, 409 same-name conflict or scan-classifying /
-                destructive job in flight, 413 file too large, 422 invalid
-                chunking configuration (an explicit ``C`` selector without a
-                custom ``LightRAG.chunking_func``), 500 other errors.
+            HTTPException: 400 unsupported file type, malformed filename
+                hint, or invalid ``chunk_size`` / ``chunk_overlap_size`` /
+                ``summary_language`` / ``parse_engine`` override, 409
+                same-name conflict or scan-classifying / destructive job in
+                flight, 413 file too large, 422 invalid chunking
+                configuration (an explicit ``C`` selector without a custom
+                ``LightRAG.chunking_func``), 500 other errors.
         """
         rag = await _ensure_dep(rag, get_rag_dependency)
         doc_manager = await _ensure_dep(doc_manager, get_doc_manager_dependency)
@@ -5648,6 +5714,35 @@ def create_document_routes(
         elif mode == "incremental":
             doc_status_extra = {"incremental_of": target_doc_ids}
 
+        # Advanced-settings overrides (optional): non-chunk entries ride the
+        # doc_status.metadata channel via doc_status_extra; chunk_size /
+        # chunk_overlap_size are merged into a chunk_options snapshot below,
+        # once the filename's parser directives are resolved.
+        summary_language = (summary_language or "").strip() or None
+        if summary_language is not None and len(summary_language) > 100:
+            raise HTTPException(
+                status_code=400,
+                detail="summary_language is too long (max 100 characters).",
+            )
+        if chunk_size is not None and chunk_size < 1:
+            raise HTTPException(
+                status_code=400, detail="chunk_size must be >= 1."
+            )
+        if chunk_overlap_size is not None and chunk_overlap_size < 0:
+            raise HTTPException(
+                status_code=400, detail="chunk_overlap_size must be >= 0."
+            )
+        doc_processing_overrides: dict[str, Any] = {}
+        if summary_language is not None:
+            doc_processing_overrides[SUMMARY_LANGUAGE_METADATA_KEY] = summary_language
+        if enable_multimodal is not None:
+            doc_processing_overrides[ENABLE_MULTIMODAL_METADATA_KEY] = enable_multimodal
+        if doc_processing_overrides:
+            doc_status_extra = {
+                **(doc_status_extra or {}),
+                **doc_processing_overrides,
+            }
+
         from lightrag.kg.shared_storage import start_reserved_background_task
 
         enqueue_token, admission_adopted = _adopt_or_new_enqueue_token(http_request)
@@ -5680,6 +5775,68 @@ def create_document_routes(
                 # document after the upload was accepted).
                 raise HTTPException(status_code=400, detail=str(hint_error))
 
+            # Advanced-settings parser-engine override. Validated as soon as
+            # the filename is known so every failure mode is a synchronous
+            # 400. A filename carrying an explicit ``[engine]`` hint keeps
+            # its hint: per-file intent outranks this batch-level choice.
+            parse_engine_override: str | None = None
+            if parse_engine is not None:
+                from lightrag.parser.registry import (
+                    engine_endpoint_configured,
+                    engine_endpoint_requirement,
+                    suffix_capabilities,
+                    supported_parser_engines,
+                )
+
+                requested_engine = normalize_parser_engine(parse_engine)
+                if not requested_engine:
+                    raise HTTPException(
+                        status_code=400, detail="parse_engine must not be empty."
+                    )
+                if requested_engine not in supported_parser_engines():
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Unknown parse engine '{requested_engine}'. "
+                            "Supported engines: "
+                            + ", ".join(sorted(supported_parser_engines()))
+                        ),
+                    )
+                # Name validity is always reported; availability / suffix
+                # checks only matter when the override would actually apply —
+                # a filename hint that outranks the form also shields the
+                # upload from an undeployed engine choice.
+                hinted_engine, _ = filename_parser_directives(safe_filename)
+                if hinted_engine is not None:
+                    parse_engine_override = None
+                else:
+                    if not engine_endpoint_configured(requested_engine):
+                        requirement = (
+                            engine_endpoint_requirement(requested_engine)
+                            or "deployment configuration"
+                        )
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Parse engine '{requested_engine}' is not "
+                                f"available on this server (missing "
+                                f"{requirement})."
+                            ),
+                        )
+                    file_suffix = parser_suffix(safe_filename)
+                    engine_suffixes = suffix_capabilities(requested_engine)
+                    if file_suffix not in engine_suffixes:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Parse engine '{requested_engine}' cannot read "
+                                f"'.{file_suffix or '<none>'}' files; it "
+                                "supports: "
+                                + ", ".join(f".{s}" for s in sorted(engine_suffixes))
+                            ),
+                        )
+                    parse_engine_override = requested_engine
+
             if not doc_manager.is_supported_file(
                 safe_filename, directives=upload_directives
             ):
@@ -5700,6 +5857,75 @@ def create_document_routes(
                     status_code=422,
                     detail=f"Invalid chunking configuration: {exc}",
                 )
+
+            # Advanced-settings chunk override: start from a fresh
+            # addon_params snapshot for the ACTIVE strategy, overlay the
+            # filename-hint params (same precedence as ``pipeline_enqueue_file``'s
+            # own overlay), then the upload-form params on top — explicit user
+            # intent outranks the filename hint. Validate the EFFECTIVE size /
+            # overlap pair here so a bad combination is a synchronous 400
+            # instead of an async error document after the upload is accepted.
+            chunk_options_override: dict | None = None
+            if chunk_size is not None or chunk_overlap_size is not None:
+                api_process_options = (
+                    upload_directives.process_options or PROCESS_OPTION_CHUNK_FIXED
+                )
+                active_strategy = parse_process_options(api_process_options).chunking
+                strategy_key = chunk_strategy_key(api_process_options)
+                chunk_options_override = resolve_chunk_options(
+                    rag.addon_params, process_options=api_process_options
+                )
+                hint_chunk_params = upload_directives.chunk_params.get(active_strategy)
+                if hint_chunk_params:
+                    chunk_options_override[strategy_key].update(hint_chunk_params)
+                if chunk_size is not None:
+                    chunk_options_override[strategy_key]["chunk_token_size"] = chunk_size
+                if chunk_overlap_size is not None:
+                    chunk_options_override[strategy_key][
+                        "chunk_overlap_token_size"
+                    ] = chunk_overlap_size
+                try:
+                    _validate_effective_chunk_overlap(
+                        chunk_options_override, strategy_key, strategy_key
+                    )
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid chunking configuration: {exc}",
+                    )
+                # Slim snapshots inherit size/overlap from the live instance
+                # at consumption time, so the snapshot-level check above is
+                # blind when only part of the pair is pinned. Close the window
+                # against the INSTANCE-resolved size (constructor/env), with
+                # the same fixed-token delimiter-only exemption the
+                # snapshot-level check applies.
+                sub_opts = chunk_options_override.get(strategy_key) or {}
+                effective_overlap = sub_opts.get("chunk_overlap_token_size")
+                if (
+                    effective_overlap is not None
+                    and not (
+                        strategy_key == "fixed_token"
+                        and sub_opts.get("split_by_character")
+                        and sub_opts.get("split_by_character_only")
+                    )
+                ):
+                    effective_size = (
+                        sub_opts.get("chunk_token_size")
+                        or chunk_options_override.get("chunk_token_size")
+                        or getattr(rag, "chunk_token_size", None)
+                        or 1200
+                    )
+                    if effective_overlap >= effective_size:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "Invalid chunking configuration: effective "
+                                f"chunk_overlap_token_size ({effective_overlap}) "
+                                f"must be < chunk_token_size ({effective_size}); "
+                                "the size is inherited from the server "
+                                "configuration when chunk_size is not set."
+                            ),
+                        )
 
             # Check file size limit (if configured)
             if (
@@ -5865,6 +6091,8 @@ def create_document_routes(
                         admission_token=enqueue_token,
                         owner=upload_owner,
                         doc_status_extra=doc_status_extra,
+                        chunk_options=chunk_options_override,
+                        parse_engine_override=parse_engine_override,
                     )
                 finally:
                     await _release_enqueue_slot(rag, enqueue_token)

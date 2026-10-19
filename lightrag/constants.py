@@ -370,6 +370,9 @@ PARSER_ENGINE_LEGACY = "legacy"
 PARSER_ENGINE_NATIVE = "native"
 PARSER_ENGINE_MINERU = "mineru"
 PARSER_ENGINE_DOCLING = "docling"
+# In-process PDF engine backed by the optional ``pymupdf4llm`` package
+# (markdown output); gated on package availability, no external endpoint.
+PARSER_ENGINE_PYMUPDF4LLM = "pymupdf4llm"
 # Standalone raster-image engine: in-process, no external endpoint.
 PARSER_ENGINE_IMAGE = "image"
 PARSED_DIR_NAME = "__parsed__"  # Dir for parsed files (renamed from __enqueued__)

@@ -141,6 +141,7 @@ from lightrag.utils_pipeline import (
     build_chunks_dict_from_chunking_result,
     chunk_fields_from_status_doc,
     compute_text_content_hash,
+    doc_processing_overrides,
     doc_status_custom_chunk_patch,
     doc_status_field,
     doc_status_parse_failure_fields,
@@ -4874,6 +4875,7 @@ class _PipelineMixin:
                     parsed_data=parsed_data_w,
                     pipeline_status=ctx.pipeline_status,
                     pipeline_status_lock=ctx.pipeline_status_lock,
+                    doc_config_overrides=doc_processing_overrides(status_doc_w),
                 )
                 # Mirror analyze-stage outcome as a 3-way decision so the
                 # ``analyzing_end_time`` stamp only ever lands on attempts
@@ -5034,6 +5036,9 @@ class _PipelineMixin:
         extraction_meta: dict[str, Any] = {}
         chunk_results: list = []
         doc_process_opts = parse_process_options("")
+        # Per-document upload-intent overrides (summary language / VLM gating),
+        # applied to every global_config build made for this document.
+        doc_config_overrides = doc_processing_overrides(status_doc)
         # Document-scoped truncation record, fed by both KG stages (extraction
         # + gleaning in extract_entities, description summaries in
         # merge_nodes_and_edges). Stamped into doc_status.metadata at the
@@ -5764,6 +5769,7 @@ class _PipelineMixin:
                             ctx.pipeline_status,
                             ctx.pipeline_status_lock,
                             truncation_tally=truncation_tally,
+                            global_config_overrides=doc_config_overrides,
                         )
                     )
                     chunk_results = await entity_relation_task
@@ -5819,12 +5825,15 @@ class _PipelineMixin:
                     # chunks_vdb / text_chunks writes (already done above)
                     # and reach PROCESSED.
                     if not doc_process_opts.skip_kg:
+                        merge_global_config = self._build_global_config()
+                        if doc_config_overrides:
+                            merge_global_config.update(doc_config_overrides)
                         await merge_nodes_and_edges(
                             chunk_results=chunk_results,
                             knowledge_graph_inst=self.chunk_entity_relation_graph,
                             entity_vdb=self.entities_vdb,
                             relationships_vdb=self.relationships_vdb,
-                            global_config=self._build_global_config(),
+                            global_config=merge_global_config,
                             full_entities_storage=self.full_entities,
                             full_relations_storage=self.full_relations,
                             doc_id=doc_id,
@@ -6900,6 +6909,7 @@ class _PipelineMixin:
         process_options: str | None = None,
         pipeline_status: dict | None = None,
         pipeline_status_lock: Any | None = None,
+        doc_config_overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Phase 2: Multimodal analysis (VLM). Writes llm_analyze_result to LightRAG Document.
 
@@ -6919,6 +6929,11 @@ class _PipelineMixin:
                 ``full_docs.process_options`` lookup; primarily used by unit
                 tests that exercise the VLM analysis path without going
                 through the enqueue pipeline.
+            doc_config_overrides: per-document global_config overrides from
+                :func:`lightrag.utils_pipeline.doc_processing_overrides`
+                (upload advanced settings). Applied on top of
+                ``_build_global_config()`` — carries only
+                ``_resolved_summary_language`` / ``vlm_process_enable``.
         """
         from lightrag.parser.routing import parse_process_options
 
@@ -7052,6 +7067,12 @@ class _PipelineMixin:
             )
 
             global_config = self._build_global_config()
+            if doc_config_overrides:
+                # Upload advanced-settings intent for THIS document; the
+                # subclass-shaped keys (``_resolved_summary_language`` /
+                # ``vlm_process_enable``) land on the config copy only —
+                # ``addon_params`` stays the shared mapping.
+                global_config.update(doc_config_overrides)
             addon_params = global_config.get("addon_params") or {}
             language = (
                 global_config.get("_resolved_summary_language")

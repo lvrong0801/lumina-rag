@@ -7,6 +7,7 @@ import {
   Table,
   TableBody,
   TableCell,
+  TableFooter,
   TableHead,
   TableHeader,
   TableRow
@@ -1567,20 +1568,6 @@ export default function DocumentManager() {
             </Button>
           </div>
 
-          {/* Pagination Controls in the middle */}
-          {pagination.total_pages > 1 && (
-            <PaginationControls
-              currentPage={pagination.page}
-              totalPages={pagination.total_pages}
-              pageSize={pagination.page_size}
-              totalCount={pagination.total_count}
-              onPageChange={handlePageChange}
-              onPageSizeChange={handlePageSizeChange}
-              isLoading={isRefreshing}
-              compact={true}
-            />
-          )}
-
           <div className="flex gap-2">
             {canWriteDocs && isSelectionMode && (
               <DeleteDocumentsDialog
@@ -1910,6 +1897,24 @@ export default function DocumentManager() {
                           </TableRow>
                         ))}
                       </TableBody>
+                        {/* Page-turn bar pinned to the table footer, centered. */}
+                        {pagination.total_pages > 1 && (
+                          <TableFooter>
+                            <TableRow>
+                              <TableCell colSpan={9} className="px-3 py-1.5">
+                                <PaginationControls
+                                  currentPage={pagination.page}
+                                  totalPages={pagination.total_pages}
+                                  pageSize={pagination.page_size}
+                                  totalCount={pagination.total_count}
+                                  onPageChange={handlePageChange}
+                                  onPageSizeChange={handlePageSizeChange}
+                                  isLoading={isRefreshing}
+                                />
+                              </TableCell>
+                            </TableRow>
+                          </TableFooter>
+                        )}
                     </Table>
                   </TooltipProvider>
                 </div>

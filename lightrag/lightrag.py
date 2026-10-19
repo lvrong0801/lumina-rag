@@ -3770,11 +3770,18 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
         pipeline_status=None,
         pipeline_status_lock=None,
         truncation_tally: TokenLimitTruncationTally | None = None,
+        global_config_overrides: dict[str, Any] | None = None,
     ) -> list:
         try:
+            global_config = self._build_global_config()
+            if global_config_overrides:
+                # Per-document upload intent (summary language / VLM gating)
+                # from doc_status.metadata — see
+                # lightrag.utils_pipeline.doc_processing_overrides.
+                global_config.update(global_config_overrides)
             chunk_results = await extract_entities(
                 chunk,
-                global_config=self._build_global_config(),
+                global_config=global_config,
                 pipeline_status=pipeline_status,
                 pipeline_status_lock=pipeline_status_lock,
                 llm_response_cache=self.llm_response_cache,

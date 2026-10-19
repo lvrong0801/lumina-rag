@@ -63,6 +63,13 @@ export type LightragRoleLLMConfig = {
   metadata?: Record<string, any>
 }
 
+export type LightragParserEngine = {
+  name: string
+  available: boolean
+  requirement: string | null
+  suffixes: string[]
+}
+
 export type LightragStatus = {
   status: 'healthy'
   working_directory: string
@@ -93,7 +100,10 @@ export type LightragStatus = {
     rerank_max_async?: number
     rerank_timeout?: number
     summary_language: string
+    chunk_token_size?: number
+    chunk_overlap_token_size?: number
     force_llm_summary_on_merge: boolean
+    parser_engines?: LightragParserEngine[]
     max_parallel_insert: number
     max_async: number
     llm_timeout?: number
@@ -1040,10 +1050,25 @@ export const insertTexts = async (texts: string[]): Promise<DocActionResponse> =
 
 export type UploadMode = 'new' | 'overwrite' | 'incremental'
 
+export type UploadDocumentOptions = {
+  mode?: UploadMode
+  targetDocIds?: string[]
+  /** Per-document token cap for the active chunking strategy (tokens). */
+  chunkSize?: number
+  /** Per-document token overlap for the active chunking strategy (tokens). */
+  chunkOverlapSize?: number
+  /** Pin the summary/analysis language for this document only. */
+  summaryLanguage?: string
+  /** Flip the server's VLM processing toggle for this document only. */
+  enableMultimodal?: boolean
+  /** Pin the parser engine for this document only (filename hint wins). */
+  parseEngine?: string
+}
+
 export const uploadDocument = async (
   file: File,
   onUploadProgress?: (percentCompleted: number) => void,
-  options?: { mode?: UploadMode; targetDocIds?: string[] }
+  options?: UploadDocumentOptions
 ): Promise<DocActionResponse> => {
   const formData = new FormData()
   formData.append('file', file)
@@ -1053,6 +1078,11 @@ export const uploadDocument = async (
   if (options?.targetDocIds?.length) {
     options.targetDocIds.forEach((id) => formData.append('target_doc_ids', id))
   }
+  if (options?.chunkSize !== undefined) formData.append('chunk_size', String(options.chunkSize))
+  if (options?.chunkOverlapSize !== undefined) formData.append('chunk_overlap_size', String(options.chunkOverlapSize))
+  if (options?.summaryLanguage !== undefined) formData.append('summary_language', options.summaryLanguage)
+  if (options?.enableMultimodal !== undefined) formData.append('enable_multimodal', String(options.enableMultimodal))
+  if (options?.parseEngine !== undefined) formData.append('parse_engine', options.parseEngine)
 
   const response = await axiosInstance.post('/documents/upload', formData, {
     headers: {

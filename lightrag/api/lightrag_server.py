@@ -80,6 +80,12 @@ from lightrag.parser.routing import (
     validate_parser_routing_config,
     validate_smart_heading_dependencies,
 )
+from lightrag.parser.registry import (
+    engine_endpoint_configured,
+    engine_endpoint_requirement,
+    suffix_capabilities,
+    supported_parser_engines,
+)
 from lightrag.parser.external.mineru.cache import MinerUParserOptions
 from lightrag.api.routers.query_routes import create_query_routes
 from lightrag.api.routers.graph_routes import create_graph_routes
@@ -3241,7 +3247,24 @@ def create_app(args):
                         "rerank_timeout": args.rerank_timeout,
                         # Environment variable status (requested configuration)
                         "summary_language": args.summary_language,
+                        # Surfaced for the upload dialog's advanced-settings
+                        # panel (server-default placeholders).
+                        "chunk_token_size": int(args.chunk_size),
+                        "chunk_overlap_token_size": int(args.chunk_overlap_size),
                         "force_llm_summary_on_merge": args.force_llm_summary_on_merge,
+                # Surfaced for the upload dialog's advanced-settings
+                # parse-engine selector: lets the UI disable undeployed
+                # engines (e.g. Docling without DOCLING_ENDPOINT) and show
+                # what each engine can read.
+                "parser_engines": [
+                    {
+                        "name": name,
+                        "available": engine_endpoint_configured(name),
+                        "requirement": engine_endpoint_requirement(name),
+                        "suffixes": sorted(suffix_capabilities(name)),
+                    }
+                    for name in sorted(supported_parser_engines())
+                ],
                         "max_parallel_insert": args.max_parallel_insert,
                         "cosine_threshold": args.cosine_threshold,
                         "min_rerank_score": args.min_rerank_score,

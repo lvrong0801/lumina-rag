@@ -421,6 +421,11 @@ def test_carry_over_keys_grouped_by_stage():
         # purge into a permanent fail-closed refusal.
         "kg_write_state",
         "kg_purge",
+        # Upload-intent overrides (advanced settings on /documents/upload) —
+        # directives honoured by every processing attempt, so they must
+        # survive every transition including FAILED->PENDING retries.
+        "summary_language",
+        "enable_multimodal",
         # Duplicate demotion — NOT stage fields, so they sit after the stage
         # groups and do not disturb the dialog's timeline. ``is_duplicate`` is
         # the predicate every backend uses to exclude a row from its canonical

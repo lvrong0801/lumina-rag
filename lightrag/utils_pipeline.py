@@ -370,6 +370,14 @@ def resolve_doc_status_parse_engine(
 # document with recovery warnings from an ordinary informational metadata row.
 KG_RECOVERY_WARNINGS_METADATA_KEY = "kg_recovery_warnings"
 
+# Per-document upload intent overrides (advanced settings on /documents/upload):
+# written into doc_status.metadata at enqueue and honoured by every processing
+# attempt, including FAILED->PENDING retries.  They are directives (what the
+# next attempt must do), not per-attempt observations, so they sit in both the
+# carry-over and the directive whitelists below.
+SUMMARY_LANGUAGE_METADATA_KEY = "summary_language"
+ENABLE_MULTIMODAL_METADATA_KEY = "enable_multimodal"
+
 
 _DOC_STATUS_METADATA_CARRY_OVER_KEYS: tuple[str, ...] = (
     "process_options",
@@ -409,6 +417,11 @@ _DOC_STATUS_METADATA_CARRY_OVER_KEYS: tuple[str, ...] = (
     # resumable purge into a permanent fail-closed refusal.
     KG_WRITE_STATE_METADATA_KEY,
     KG_PURGE_METADATA_KEY,
+    # Upload-intent overrides: dropping them on a transition would silently
+    # re-chunk / re-analyze the document with server defaults instead of the
+    # parameters the upload asked for.
+    SUMMARY_LANGUAGE_METADATA_KEY,
+    ENABLE_MULTIMODAL_METADATA_KEY,
     # Duplicate demotion. ``metadata.is_duplicate`` is not a display field: it is
     # the ONLY thing that makes a row ineligible as a primary candidate for its
     # canonical source (``_basename_of`` returns None for it), so an operator's
@@ -493,6 +506,33 @@ def doc_status_kg_write_state(status_doc: Any) -> str | None:
         return None
     state = raw_metadata.get(KG_WRITE_STATE_METADATA_KEY)
     return state if isinstance(state, str) and state else None
+
+
+def doc_processing_overrides(status_doc: Any) -> dict[str, Any]:
+    """Return the document's upload-intent overrides, mapped onto global_config keys.
+
+    ``/documents/upload`` callers may pin a per-document summary language or
+    flip VLM processing on/off for this document only.  The values live in
+    ``doc_status.metadata`` under :data:`SUMMARY_LANGUAGE_METADATA_KEY` /
+    :data:`ENABLE_MULTIMODAL_METADATA_KEY`; consumers ``config.update(...)``
+    with the result after ``_build_global_config()``.  Unknown or malformed
+    values (e.g. written by a newer/older server version) are ignored — the
+    document then processes under the server defaults, which is the same
+    behaviour the upload would have had before these keys existed.
+    """
+    if status_doc is None:
+        return {}
+    raw_metadata = doc_status_field(status_doc, "metadata", {})
+    if not isinstance(raw_metadata, dict):
+        return {}
+    overrides: dict[str, Any] = {}
+    language = raw_metadata.get(SUMMARY_LANGUAGE_METADATA_KEY)
+    if isinstance(language, str) and language.strip():
+        overrides["_resolved_summary_language"] = language.strip()
+    multimodal = raw_metadata.get(ENABLE_MULTIMODAL_METADATA_KEY)
+    if isinstance(multimodal, bool):
+        overrides["vlm_process_enable"] = multimodal
+    return overrides
 
 
 def doc_status_kg_purge_journal(status_doc: Any) -> dict[str, Any] | None:
@@ -617,6 +657,10 @@ _DOC_STATUS_METADATA_DIRECTIVE_KEYS: tuple[str, ...] = (
     # document PENDING, i.e. still pre-graph.
     KG_WRITE_STATE_METADATA_KEY,
     KG_PURGE_METADATA_KEY,
+    # Upload-intent overrides: a retry must process the document with the same
+    # summary language / multimodal gating the upload requested.
+    SUMMARY_LANGUAGE_METADATA_KEY,
+    ENABLE_MULTIMODAL_METADATA_KEY,
     # A demotion is an operator decision, not a per-attempt result: the manual
     # FAILED→PENDING retry must not undo it. A demoted row keeps its content and
     # its FAILED status, so it is reset like any other failed document — and

@@ -1,6 +1,14 @@
 import { useState, useCallback, useEffect } from 'react'
 import { FileRejection } from 'react-dropzone'
 import Button from '@/components/ui/Button'
+import NumberInput from '@/components/ui/NumberInput'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@/components/ui/Select'
 import {
   Dialog,
   DialogContent,
@@ -20,17 +28,35 @@ import {
   normalizeSupportedFileTypes,
   type FileTypesState
 } from '@/lib/fileTypes'
-import { errorMessage } from '@/lib/utils'
+import { errorMessage, cn } from '@/lib/utils'
 import {
   getSupportedFileTypes,
   getDocumentsPaginated,
   uploadDocument,
+  checkHealth,
   type DocStatusResponse,
+  type LightragParserEngine,
+  type LightragStatus,
+  type UploadDocumentOptions,
   type UploadMode
 } from '@/api/lightrag'
 
-import { UploadIcon } from 'lucide-react'
+import { UploadIcon, Settings2, ChevronDown, ChevronUp, Info } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+
+const SUMMARY_LANGUAGES = ['Chinese', 'English', 'Japanese', 'Korean', 'French', 'German', 'Spanish', 'Russian']
+
+// Engines offered in the advanced-settings parse-engine selector. The 'default'
+// option keeps the server's own routing (filename hint / LIGHTRAG_PARSER rules
+// / suffix defaults); picking an engine pins it for the whole batch. Available
+// engines the server reports that are NOT listed here (e.g. future engines)
+// are still appended dynamically in the dialog.
+const PARSE_ENGINE_CHOICES = ['docling', 'pymupdf4llm'] as const
+
+const PARSE_ENGINE_DISPLAY_NAMES: Record<string, string> = {
+  docling: 'Docling',
+  pymupdf4llm: 'PyMuPDF4LLM'
+}
 
 interface UploadDocumentsDialogProps {
   onDocumentsUploaded?: () => Promise<void>
@@ -58,6 +84,27 @@ export default function UploadDocumentsDialog({
   const [targetDocIds, setTargetDocIds] = useState<string[]>([])
   const [targetDocs, setTargetDocs] = useState<DocStatusResponse[]>([])
   const [targetDocsLoading, setTargetDocsLoading] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+
+  // Server-side defaults surfaced as placeholders / labels in the advanced
+  // settings panel; fetched once per dialog open from /health.
+  const [serverDefaults, setServerDefaults] = useState<{
+    chunkTokenSize?: number
+    chunkOverlapTokenSize?: number
+    summaryLanguage?: string
+    vlmProcessEnable?: boolean
+  } | null>(null)
+
+  // Advanced settings — undefined / 'default' means "keep the server default":
+  // the field is then omitted from the upload form entirely.
+  const [chunkSize, setChunkSize] = useState<number | undefined>(undefined)
+  const [chunkOverlap, setChunkOverlap] = useState<number | undefined>(undefined)
+  const [enableMultimodal, setEnableMultimodal] = useState<string>('default')
+  const [summaryLanguage, setSummaryLanguage] = useState<string>('default')
+  const [parseEngine, setParseEngine] = useState<string>('default')
+  // Engine availability matrix from /health; empty until fetched (options then
+  // stay enabled optimistically — the server still validates synchronously).
+  const [parserEngines, setParserEngines] = useState<LightragParserEngine[]>([])
 
   // Fetch the live allowlist + engine capability matrix while the dialog is
   // open. `loading` is entered synchronously in onOpenChange (not here) so
@@ -111,6 +158,42 @@ export default function UploadDocumentsDialog({
       })
     return () => controller.abort()
   }, [open, mode])
+
+  // Fetch server defaults while the dialog is open so the advanced-settings
+  // placeholders reflect the actual runtime configuration (env overrides the
+  // built-in defaults). Failures are non-fatal — fields fall back to generic
+  // placeholders and an omitted value still means "server default".
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    checkHealth()
+      .then((res) => {
+        if (cancelled || res.status !== 'healthy') return
+        const cfg = (res as LightragStatus).configuration
+        setServerDefaults({
+          chunkTokenSize: cfg.chunk_token_size,
+          chunkOverlapTokenSize: cfg.chunk_overlap_token_size,
+          summaryLanguage: cfg.summary_language,
+          vlmProcessEnable: cfg.vlm_process_enable
+        })
+        setParserEngines(cfg.parser_engines ?? [])
+      })
+      .catch((err) => {
+        if (cancelled) return
+        console.warn('Failed to fetch server defaults for upload dialog:', err)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open])
+
+  const resetAdvancedOptions = useCallback(() => {
+    setChunkSize(undefined)
+    setChunkOverlap(undefined)
+    setEnableMultimodal('default')
+    setSummaryLanguage('default')
+    setParseEngine('default')
+  }, [])
 
   const handleModeChange = useCallback((next: UploadMode) => {
     setMode(next)
@@ -177,6 +260,15 @@ export default function UploadDocumentsDialog({
         const uploadErrors: Record<string, string> = {}
         let batchProbeTriggered = false
 
+        // Advanced settings apply to every file in this batch; unset fields
+        // stay omitted so the server keeps its defaults.
+        const uploadOptions: UploadDocumentOptions = { mode, targetDocIds }
+        if (chunkSize !== undefined) uploadOptions.chunkSize = chunkSize
+        if (chunkOverlap !== undefined) uploadOptions.chunkOverlapSize = chunkOverlap
+        if (enableMultimodal !== 'default') uploadOptions.enableMultimodal = enableMultimodal === 'true'
+        if (summaryLanguage !== 'default') uploadOptions.summaryLanguage = summaryLanguage
+        if (parseEngine !== 'default') uploadOptions.parseEngine = parseEngine
+
         // Create a collator that supports Chinese sorting
         const collator = new Intl.Collator(['zh-CN', 'en'], {
           sensitivity: 'accent',  // consider basic characters, accents, and case
@@ -204,7 +296,7 @@ export default function UploadDocumentsDialog({
                   [file.name]: percentCompleted
                 }))
               },
-              { mode, targetDocIds }
+              uploadOptions
             )
 
             if (result.status !== 'success') {
@@ -293,6 +385,8 @@ export default function UploadDocumentsDialog({
           setProgresses({})
           setFileErrors({})
           setTargetDocIds([])
+          resetAdvancedOptions()
+          setShowAdvanced(false)
           setOpen(false)
         }
       } catch (err) {
@@ -302,7 +396,7 @@ export default function UploadDocumentsDialog({
         setIsUploading(false)
       }
     },
-    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted, mode, targetDocIds]
+    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted, mode, targetDocIds, chunkSize, chunkOverlap, enableMultimodal, summaryLanguage, parseEngine, resetAdvancedOptions]
   )
 
   const uploaderInputs = deriveUploaderInputs(fileTypes)
@@ -323,6 +417,9 @@ export default function UploadDocumentsDialog({
           setProgresses({})
           setFileErrors({})
           setFileTypes({ status: 'idle' })
+          resetAdvancedOptions()
+          setShowAdvanced(false)
+          setServerDefaults(null)
         }
         setOpen(nextOpen)
       }}
@@ -335,26 +432,30 @@ export default function UploadDocumentsDialog({
       <DialogContent className="sm:max-w-xl" onCloseAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle>{t('documentPanel.uploadDocuments.title')}</DialogTitle>
-          <DialogDescription>
+          {/* sr-only: the dropzone already carries the visual "drag or click"
+              instruction; the description stays for assistive tech. */}
+          <DialogDescription className="sr-only">
             {t('documentPanel.uploadDocuments.description')}
           </DialogDescription>
         </DialogHeader>
 
         {/* Upload mode selector */}
         <div className="flex flex-col gap-2">
-          <span className="text-sm font-medium">{t('documentPanel.uploadDocuments.mode.label')}</span>
-          <div className="flex gap-2">
-            {UPLOAD_MODES.map((m) => (
-              <Button
-                key={m}
-                type="button"
-                variant={mode === m ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => handleModeChange(m)}
-              >
-                {t(`documentPanel.uploadDocuments.mode.${m}`)}
-              </Button>
-            ))}
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-medium">{t('documentPanel.uploadDocuments.mode.label')}</span>
+            <div className="flex gap-2">
+              {UPLOAD_MODES.map((m) => (
+                <Button
+                  key={m}
+                  type="button"
+                  variant={mode === m ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => handleModeChange(m)}
+                >
+                  {t(`documentPanel.uploadDocuments.mode.${m}`)}
+                </Button>
+              ))}
+            </div>
           </div>
           {mode === 'overwrite' && (
             <p className="text-muted-foreground text-xs">{t('documentPanel.uploadDocuments.mode.overwriteHint')}</p>
@@ -417,6 +518,197 @@ export default function UploadDocumentsDialog({
           acceptedExtensions={uploaderInputs.acceptedExtensions}
           engineCapabilities={uploaderInputs.engineCapabilities}
         />
+
+        {/* Advanced settings — per-document processing overrides.
+            'default' / empty means the field is omitted and the server keeps
+            its configured default. */}
+        <div className="overflow-hidden rounded-lg border">
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((v) => !v)}
+            className="bg-muted/40 hover:bg-muted/70 flex w-full items-center justify-between px-4 py-2.5 text-sm font-medium transition-colors"
+          >
+            <span className="text-muted-foreground flex items-center gap-2">
+              <Settings2 className="h-4 w-4" />
+              {t('documentPanel.uploadDocuments.advancedSettings.title')}
+            </span>
+            {showAdvanced
+              ? <ChevronUp className="text-muted-foreground h-4 w-4" />
+              : <ChevronDown className="text-muted-foreground h-4 w-4" />}
+          </button>
+
+          <div className={cn('transition-all duration-200', showAdvanced ? 'block' : 'hidden')}>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t p-4">
+
+              {/* Chunk Size */}
+              <div className="space-y-1.5">
+                <label className="text-foreground text-xs font-medium">
+                  {t('documentPanel.uploadDocuments.advancedSettings.chunkSize')}
+                </label>
+                <NumberInput
+                  min={100}
+                  max={4000}
+                  stepper={100}
+                  className="pr-10"
+                  placeholder={
+                    serverDefaults?.chunkTokenSize !== undefined
+                      ? `${t('documentPanel.uploadDocuments.advancedSettings.serverDefault')} ${serverDefaults.chunkTokenSize}`
+                      : t('documentPanel.uploadDocuments.advancedSettings.chunkSizePlaceholder')
+                  }
+                  value={chunkSize}
+                  onValueChange={setChunkSize}
+                  suffix=" tokens"
+                />
+                <p className="text-muted-foreground flex items-center gap-1 text-xs">
+                  <Info className="h-3 w-3 shrink-0" />
+                  {t('documentPanel.uploadDocuments.advancedSettings.chunkSizeHint')}
+                </p>
+              </div>
+
+              {/* Chunk Overlap */}
+              <div className="space-y-1.5">
+                <label className="text-foreground text-xs font-medium">
+                  {t('documentPanel.uploadDocuments.advancedSettings.chunkOverlap')}
+                </label>
+                <NumberInput
+                  min={0}
+                  max={500}
+                  stepper={50}
+                  className="pr-10"
+                  placeholder={
+                    serverDefaults?.chunkOverlapTokenSize !== undefined
+                      ? `${t('documentPanel.uploadDocuments.advancedSettings.serverDefault')} ${serverDefaults.chunkOverlapTokenSize}`
+                      : t('documentPanel.uploadDocuments.advancedSettings.chunkOverlapPlaceholder')
+                  }
+                  value={chunkOverlap}
+                  onValueChange={setChunkOverlap}
+                  suffix=" tokens"
+                />
+                <p className="text-muted-foreground flex items-center gap-1 text-xs">
+                  <Info className="h-3 w-3 shrink-0" />
+                  {t('documentPanel.uploadDocuments.advancedSettings.chunkOverlapHint')}
+                </p>
+              </div>
+
+              {/* Summary Language */}
+              <div className="space-y-1.5">
+                <label className="text-foreground text-xs font-medium">
+                  {t('documentPanel.uploadDocuments.advancedSettings.summaryLanguage')}
+                </label>
+                <Select value={summaryLanguage} onValueChange={setSummaryLanguage}>
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">
+                      {serverDefaults?.summaryLanguage
+                        ? `${t('documentPanel.uploadDocuments.advancedSettings.serverDefault')} (${serverDefaults.summaryLanguage})`
+                        : t('documentPanel.uploadDocuments.advancedSettings.serverDefault')}
+                    </SelectItem>
+                    {SUMMARY_LANGUAGES.map((lang) => (
+                      <SelectItem key={lang} value={lang}>{lang}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-muted-foreground flex items-center gap-1 text-xs">
+                  <Info className="h-3 w-3 shrink-0" />
+                  {t('documentPanel.uploadDocuments.advancedSettings.summaryLanguageHint')}
+                </p>
+              </div>
+
+              {/* Multimodal */}
+              <div className="space-y-1.5">
+                <label className="text-foreground text-xs font-medium">
+                  {t('documentPanel.uploadDocuments.advancedSettings.multimodal')}
+                </label>
+                <Select value={enableMultimodal} onValueChange={setEnableMultimodal}>
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">
+                      {(() => {
+                        const serverDefault = t('documentPanel.uploadDocuments.advancedSettings.serverDefault')
+                        if (serverDefaults?.vlmProcessEnable === undefined) return serverDefault
+                        const modeLabel = serverDefaults.vlmProcessEnable
+                          ? t('documentPanel.uploadDocuments.advancedSettings.multimodalOn')
+                          : t('documentPanel.uploadDocuments.advancedSettings.multimodalOff')
+                        return `${serverDefault} (${modeLabel})`
+                      })()}
+                    </SelectItem>
+                    <SelectItem value="true">
+                      {t('documentPanel.uploadDocuments.advancedSettings.multimodalOn')}
+                    </SelectItem>
+                    <SelectItem value="false">
+                      {t('documentPanel.uploadDocuments.advancedSettings.multimodalOff')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-muted-foreground flex items-center gap-1 text-xs">
+                  <Info className="h-3 w-3 shrink-0" />
+                  {t('documentPanel.uploadDocuments.advancedSettings.multimodalHint')}
+                </p>
+              </div>
+
+              {/* Parse Engine */}
+              <div className="space-y-1.5">
+                <label className="text-foreground text-xs font-medium">
+                  {t('documentPanel.uploadDocuments.advancedSettings.parseEngine')}
+                </label>
+                <Select value={parseEngine} onValueChange={setParseEngine}>
+                  <SelectTrigger className="h-9 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">
+                      {t('documentPanel.uploadDocuments.advancedSettings.parseEngineDefault')}
+                    </SelectItem>
+                    {(() => {
+                      const engines = new Map(parserEngines.map((e) => [e.name, e]))
+                      const choices = [
+                        ...PARSE_ENGINE_CHOICES,
+                        ...parserEngines
+                          .map((e) => e.name)
+                          .filter((n) => !(PARSE_ENGINE_CHOICES as readonly string[]).includes(n))
+                      ]
+                      return choices.map((name) => {
+                        const info = engines.get(name)
+                        const suffixScope = info?.suffixes?.length
+                          ? `.${info.suffixes.join(' .')}`
+                          : null
+                        const unavailable = info !== undefined && !info.available
+                        return (
+                          <SelectItem key={name} value={name} disabled={unavailable}>
+                            {PARSE_ENGINE_DISPLAY_NAMES[name] ?? name}
+                            {suffixScope ? ` (${suffixScope})` : ''}
+                            {unavailable ? ` · ${t('documentPanel.uploadDocuments.advancedSettings.parseEngineUnavailable')}` : ''}
+                          </SelectItem>
+                        )
+                      })
+                    })()}
+                  </SelectContent>
+                </Select>
+                <p className="text-muted-foreground flex items-center gap-1 text-xs">
+                  <Info className="h-3 w-3 shrink-0" />
+                  {t('documentPanel.uploadDocuments.advancedSettings.parseEngineHint')}
+                </p>
+              </div>
+
+              {/* Reset action fills the trailing cell so the panel is a
+                  complete 2×3 grid. */}
+              <div className="flex items-end justify-end pb-0.5">
+                <button
+                  type="button"
+                  onClick={resetAdvancedOptions}
+                  className="text-muted-foreground hover:text-foreground text-xs underline underline-offset-2 transition-colors"
+                >
+                  {t('documentPanel.uploadDocuments.advancedSettings.reset')}
+                </button>
+              </div>
+
+            </div>
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   )

@@ -227,6 +227,13 @@ offline = [
     "lightrag-hku[api,offline-storage,offline-llm]",
 ]
 
+pymupdf4llm = [
+    # Optional in-process PDF -> markdown parser engine
+    # (lightrag/parser/pymupdf4llm); the engine's registry gate checks this
+    # package's availability instead of an env-configured endpoint.
+    "pymupdf4llm>=1.0.0,<2.0.0",
+]
+
 test = [
     "lightrag-hku[api]",
     "pytest>=8.4.2",

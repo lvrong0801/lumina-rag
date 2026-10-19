@@ -108,6 +108,7 @@ const displayFileName = (doc: DocStatusResponse, maxLength = 40): string => {
 export default function Dashboard() {
   const { t } = useTranslation()
   const setCurrentTab = useSettingsStore.use.setCurrentTab()
+  const currentWorkspace = useSettingsStore.use.currentWorkspace()
   const {
     health,
     healthError,
@@ -142,6 +143,9 @@ export default function Dashboard() {
   }
 
   const config = health?.configuration
+  // The badge must mirror what the WorkspaceSelector actually applies: a
+  // non-empty client selection wins, '' falls back to the server default.
+  const activeWorkspace = currentWorkspace || config?.workspace || 'default'
 
   return (
     <div className="h-full overflow-y-auto">
@@ -299,11 +303,11 @@ export default function Dashboard() {
                 </Badge>
               </div>
 
-              {config?.workspace !== undefined && (
+              {(config?.workspace !== undefined || currentWorkspace !== '') && (
                 <div className="flex items-center justify-between rounded-lg bg-muted/50 p-3">
                   <span className="text-sm font-medium">{t('dashboard.health.workspace')}</span>
                   <span className="max-w-[140px] truncate font-mono text-sm text-muted-foreground">
-                    {config.workspace || 'default'}
+                    {activeWorkspace}
                   </span>
                 </div>
               )}

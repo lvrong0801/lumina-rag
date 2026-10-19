@@ -16,6 +16,7 @@ strings used as identifiers / registry keys.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import re
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from lightrag.constants import (
     PARSER_ENGINE_LEGACY,
     PARSER_ENGINE_MINERU,
     PARSER_ENGINE_NATIVE,
+    PARSER_ENGINE_PYMUPDF4LLM,
 )
 
 if TYPE_CHECKING:
@@ -64,6 +66,12 @@ def _mineru_endpoint_requirement() -> str | None:
 
 def _env_endpoint_configured(env_name: str) -> Callable[[], bool]:
     return lambda: bool(os.getenv(env_name, "").strip())
+
+
+def _package_installed(pkg_name: str) -> Callable[[], bool]:
+    # find_spec resolves without importing the package, keeping this gate
+    # cheap enough for the import-cheap registry module.
+    return lambda: importlib.util.find_spec(pkg_name) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +313,18 @@ _REGISTRY: dict[str, ParserSpec] = {
         endpoint_configured=_env_endpoint_configured("DOCLING_ENDPOINT"),
         endpoint_requirement=lambda: "DOCLING_ENDPOINT",
         extra_suffixes_env="DOCLING_ADDITIONAL_SUFFIXES",
+    ),
+    PARSER_ENGINE_PYMUPDF4LLM: ParserSpec(
+        engine_name=PARSER_ENGINE_PYMUPDF4LLM,
+        impl="lightrag.parser.pymupdf4llm.parser:PyMuPDF4LLMParser",
+        # Powerful on born-digital PDFs; scanned pages are image-only and
+        # extract to nothing (the parser refuses them) — no OCR is bundled.
+        suffixes=frozenset({"pdf"}),
+        queue_group=PARSER_ENGINE_NATIVE,  # in-process; shares the native pool
+        endpoint_configured=_package_installed("pymupdf4llm"),
+        endpoint_requirement=lambda: (
+            "pymupdf4llm package (uv sync --extra pymupdf4llm)"
+        ),
     ),
     PARSER_ENGINE_IMAGE: ParserSpec(
         engine_name=PARSER_ENGINE_IMAGE,

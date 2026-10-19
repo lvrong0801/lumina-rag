@@ -21,7 +21,6 @@ export type PaginationControlsProps = {
    * user's last intent.
    */
   isLoading?: boolean
-  compact?: boolean
   className?: string
 }
 
@@ -41,7 +40,6 @@ export default function PaginationControls({
   onPageChange,
   onPageSizeChange,
   isLoading = false,
-  compact = false,
   className
 }: PaginationControlsProps) {
   const { t } = useTranslation()
@@ -123,66 +121,8 @@ export default function PaginationControls({
     return null
   }
 
-  if (compact) {
-    return (
-      <div className={cn('flex items-center gap-2', className)}>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={goToPrevPage}
-            disabled={currentPage <= 1 || isLoading}
-            className="h-8 w-8 p-0"
-          >
-            <ChevronLeftIcon className="h-4 w-4" />
-          </Button>
-
-          <div className="flex items-center gap-1">
-            <Input
-              type="text"
-              value={inputPage}
-              onChange={(e) => handlePageInputChange(e.target.value)}
-              onBlur={handlePageInputSubmit}
-              onKeyPress={handlePageInputKeyPress}
-              disabled={isLoading}
-              className="h-8 w-12 text-center text-sm"
-            />
-            <span className="text-sm text-gray-500">/ {totalPages}</span>
-          </div>
-
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={goToNextPage}
-            disabled={currentPage >= totalPages || isLoading}
-            className="h-8 w-8 p-0"
-          >
-            <ChevronRightIcon className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <Select
-          value={pageSize.toString()}
-          onValueChange={handlePageSizeChange}
-          disabled={isLoading}
-        >
-          <SelectTrigger className="h-8 w-16">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {PAGE_SIZE_OPTIONS.map((option) => (
-              <SelectItem key={option.value} value={option.value.toString()}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-    )
-  }
-
   return (
-    <div className={cn('flex items-center justify-between gap-4', className)}>
+    <div className={cn('flex items-center justify-center gap-6', className)}>
       <div className="text-sm text-gray-500">
         {t('pagination.showing', {
           start: Math.min((currentPage - 1) * pageSize + 1, totalCount),

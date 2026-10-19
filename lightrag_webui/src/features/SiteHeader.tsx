@@ -1,7 +1,6 @@
 import Button from '@/components/ui/Button'
 import { entryHomeHref } from '@/lib/pathPrefix'
 import { SiteInfo, backendBaseUrl } from '@/lib/constants'
-import AppSettings from '@/components/AppSettings'
 import { TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore, useBackendState } from '@/stores/state'
@@ -172,7 +171,6 @@ export default function SiteHeader() {
               <GithubIcon className="size-4" />
             </a>
           </Button>
-          <AppSettings />
           {!isGuestMode && (
             <Button
               variant="ghost"
