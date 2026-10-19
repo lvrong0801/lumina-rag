@@ -17,9 +17,11 @@ export const TabVisibilityProvider: React.FC<TabVisibilityProviderProps> = ({ ch
 
   // Initialize visibility state with all tabs visible
   const [visibleTabs, setVisibleTabs] = useState<Record<string, boolean>>(() => ({
+    'dashboard': true,
     'documents': true,
     'knowledge-graph': true,
-    'retrieval': true
+    'retrieval': true,
+    'admin': true
   }));
 
   // Keep all tabs visible because we use CSS to control TAB visibility instead of React.
@@ -28,9 +30,11 @@ export const TabVisibilityProvider: React.FC<TabVisibilityProviderProps> = ({ ch
   useEffect(() => {
     const timer = setTimeout(() => setVisibleTabs((prev) => ({
       ...prev,
+      'dashboard': true,
       'documents': true,
       'knowledge-graph': true,
-      'retrieval': true
+      'retrieval': true,
+      'admin': true
     })), 0)
     return () => clearTimeout(timer)
   }, [currentTab]);

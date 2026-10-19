@@ -23,6 +23,8 @@ import { ZapIcon } from 'lucide-react'
 import GraphViewer from '@/features/GraphViewer'
 import DocumentManager from '@/features/DocumentManager'
 import RetrievalView from '@/features/RetrievalView'
+import Dashboard from '@/features/Dashboard'
+import AdminPage from '@/features/AdminPage'
 import { Tabs, TabsContent } from '@/components/ui/Tabs'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import usePageRestoreGeneration from '@/hooks/usePageRestoreGeneration'
@@ -183,6 +185,11 @@ function App() {
               <div className="flex flex-1 flex-col min-w-0">
                 <SiteHeader />
                 <div className="relative grow bg-shell">
+                  <TabsContent value="dashboard" className="absolute top-0 right-0 bottom-0 left-0 overflow-hidden">
+                    <ErrorBoundary>
+                      <Dashboard />
+                    </ErrorBoundary>
+                  </TabsContent>
                   <TabsContent value="documents" className="absolute top-0 right-0 bottom-0 left-0 overflow-auto">
                     <ErrorBoundary>
                       <DocumentManager />
@@ -196,6 +203,11 @@ function App() {
                   <TabsContent value="retrieval" className="absolute top-0 right-0 bottom-0 left-0 overflow-hidden">
                     <ErrorBoundary>
                       <RetrievalView key={identityEpoch} />
+                    </ErrorBoundary>
+                  </TabsContent>
+                  <TabsContent value="admin" className="absolute top-0 right-0 bottom-0 left-0 overflow-hidden">
+                    <ErrorBoundary>
+                      <AdminPage />
                     </ErrorBoundary>
                   </TabsContent>
                 </div>

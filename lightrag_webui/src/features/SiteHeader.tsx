@@ -8,6 +8,7 @@ import { useAuthStore, useBackendState } from '@/stores/state'
 import { cn } from '@/lib/utils'
 import { useTranslation } from 'react-i18next'
 import { navigationService } from '@/services/navigation'
+import { canManageUsers } from '@/lib/rbac'
 import { ZapIcon, LogOutIcon, BookOpenIcon } from 'lucide-react'
 import GithubIcon from '@/components/icons/GithubIcon'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/Tooltip'
@@ -37,11 +38,15 @@ function NavigationTab({ value, currentTab, children }: NavigationTabProps) {
 // but below md the aside is display:none and these tabs are the only switcher.
 function TabsNavigation() {
   const currentTab = useSettingsStore.use.currentTab()
+  const { role } = useAuthStore()
   const { t } = useTranslation()
 
   return (
     <div className="flex h-8 self-center md:hidden">
       <TabsList className="h-full gap-2">
+        <NavigationTab value="dashboard" currentTab={currentTab}>
+          {t('header.dashboard')}
+        </NavigationTab>
         <NavigationTab value="documents" currentTab={currentTab}>
           {t('header.documents')}
         </NavigationTab>
@@ -51,6 +56,11 @@ function TabsNavigation() {
         <NavigationTab value="retrieval" currentTab={currentTab}>
           {t('header.retrieval')}
         </NavigationTab>
+        {canManageUsers(role) && (
+          <NavigationTab value="admin" currentTab={currentTab}>
+            {t('header.admin')}
+          </NavigationTab>
+        )}
       </TabsList>
     </div>
   )

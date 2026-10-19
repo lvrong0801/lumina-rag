@@ -7,6 +7,8 @@
     "system": "系统"
   },
   "header": {
+    "dashboard": "仪表盘",
+    "admin": "系统管理",
     "documents": "文档",
     "knowledgeGraph": "知识图谱",
     "retrieval": "检索",
@@ -129,6 +131,78 @@
     "grantError": "设置权限失败。",
     "revokeSuccess": "已撤销“{{name}}”的权限。",
     "revokeError": "撤销权限失败。"
+  },
+  "dashboard": {
+    "title": "仪表盘",
+    "subtitle": "知识库运行状态与文档总览",
+    "loading": "正在加载仪表盘…",
+    "refresh": "刷新",
+    "lastUpdated": "更新于 {{time}}",
+    "healthError": "无法获取系统状态",
+    "stats": {
+      "total": "文档总数",
+      "completed": "已完成",
+      "processing": "处理中",
+      "failed": "失败",
+      "pipeline": "流水线",
+      "pipelineBusy": "运行中",
+      "pipelineIdle": "空闲"
+    },
+    "systemConfig": {
+      "title": "系统配置",
+      "llm": "语言模型",
+      "embedding": "向量模型",
+      "storage": "存储",
+      "reranker": "重排序",
+      "version": "版本",
+      "model": "模型",
+      "binding": "接入方",
+      "kvStorage": "KV 存储",
+      "graphStorage": "图存储",
+      "vectorStorage": "向量存储"
+    },
+    "health": {
+      "title": "系统状态",
+      "status": "健康状态",
+      "healthy": "正常",
+      "unhealthy": "异常",
+      "pipeline": "流水线",
+      "workspace": "当前工作区"
+    },
+    "recentDocs": {
+      "title": "最近文档",
+      "viewAll": "查看全部",
+      "empty": "暂无文档"
+    }
+  },
+  "adminPage": {
+    "title": "系统管理",
+    "subtitle": "偏好设置、账号与角色权限集中管理",
+    "forbidden": "仅管理员可以访问系统管理页。",
+    "tabs": {
+      "preferences": "偏好设置",
+      "users": "用户管理",
+      "roles": "角色划分"
+    },
+    "roles": {
+      "globalTitle": "全局角色",
+      "accessTitle": "工作区权限级别",
+      "role": "角色",
+      "level": "级别",
+      "description": "说明",
+      "members": "用户数",
+      "desc": {
+        "admin": "完全访问：管理用户与授权、新建/删除工作区，读写所有数据",
+        "manager": "在获授 write/admin 的工作区可读写；不能管理用户与工作区",
+        "viewer": "默认只读；可按工作区授予 write/admin 获得写权限",
+        "guest": "免登录开放模式（认证关闭时）"
+      },
+      "accessDesc": {
+        "read": "只读浏览该工作区",
+        "write": "可上传、重试、分类与编辑该工作区内容",
+        "admin": "完整权限，含该工作区数据的删除级操作"
+      }
+    }
   },
   "documentPanel": {
     "clearDocuments": {

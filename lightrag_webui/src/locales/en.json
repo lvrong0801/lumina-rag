@@ -7,6 +7,8 @@
     "system": "System"
   },
   "header": {
+    "dashboard": "Dashboard",
+    "admin": "System",
     "documents": "Documents",
     "knowledgeGraph": "Knowledge Graph",
     "retrieval": "Retrieval",
@@ -129,6 +131,78 @@
     "grantError": "Failed to set permission.",
     "revokeSuccess": "Revoked permission on \"{{name}}\".",
     "revokeError": "Failed to revoke permission."
+  },
+  "dashboard": {
+    "title": "Dashboard",
+    "subtitle": "Runtime status and document overview of this knowledge base",
+    "loading": "Loading dashboard…",
+    "refresh": "Refresh",
+    "lastUpdated": "Updated at {{time}}",
+    "healthError": "Unable to fetch system status",
+    "stats": {
+      "total": "Total Documents",
+      "completed": "Completed",
+      "processing": "Processing",
+      "failed": "Failed",
+      "pipeline": "Pipeline",
+      "pipelineBusy": "Busy",
+      "pipelineIdle": "Idle"
+    },
+    "systemConfig": {
+      "title": "System Configuration",
+      "llm": "LLM",
+      "embedding": "Embedding",
+      "storage": "Storage",
+      "reranker": "Reranker",
+      "version": "Version",
+      "model": "Model",
+      "binding": "Binding",
+      "kvStorage": "KV Storage",
+      "graphStorage": "Graph Storage",
+      "vectorStorage": "Vector Storage"
+    },
+    "health": {
+      "title": "System Health",
+      "status": "Status",
+      "healthy": "Healthy",
+      "unhealthy": "Unhealthy",
+      "pipeline": "Pipeline",
+      "workspace": "Workspace"
+    },
+    "recentDocs": {
+      "title": "Recent Documents",
+      "viewAll": "View all",
+      "empty": "No documents yet"
+    }
+  },
+  "adminPage": {
+    "title": "System Administration",
+    "subtitle": "Preferences, accounts, roles and permissions in one place",
+    "forbidden": "Only admins can access the system administration page.",
+    "tabs": {
+      "preferences": "Preferences",
+      "users": "Users",
+      "roles": "Roles"
+    },
+    "roles": {
+      "globalTitle": "Global Roles",
+      "accessTitle": "Workspace Access Levels",
+      "role": "Role",
+      "level": "Level",
+      "description": "Description",
+      "members": "Members",
+      "desc": {
+        "admin": "Full access: manage users & grants, create/delete workspaces, read-write everything",
+        "manager": "Read-write on workspaces granted write/admin; cannot manage users or workspaces",
+        "viewer": "Read-only by default; can be granted write/admin per workspace",
+        "guest": "Login-free open mode (when auth is disabled)"
+      },
+      "accessDesc": {
+        "read": "Read-only browsing of the workspace",
+        "write": "Upload, retry, categorize and edit workspace content",
+        "admin": "Full rights including delete-level operations on workspace data"
+      }
+    }
   },
   "documentPanel": {
     "clearDocuments": {

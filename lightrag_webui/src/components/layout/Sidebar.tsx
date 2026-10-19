@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import {
   FileTextIcon,
+  LayoutDashboardIcon,
   MessageSquareTextIcon,
   NetworkIcon,
   SettingsIcon,
-  UsersIcon,
+  ShieldCheckIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   ZapIcon
@@ -17,22 +18,23 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/Tooltip'
 import Button from '@/components/ui/Button'
-import AdminUserDialog from '@/components/admin/AdminUserDialog'
 import { canManageUsers } from '@/lib/rbac'
 import { cn } from '@/lib/utils'
 
-/** Navigation tab definitions for the sidebar. */
+/** Navigation tab definitions for the sidebar; `adminOnly` entries render
+    only when canManageUsers(role) (server enforces the same gate). */
 const TABS = [
+  { value: 'dashboard', icon: LayoutDashboardIcon, labelKey: 'header.dashboard' },
   { value: 'documents', icon: FileTextIcon, labelKey: 'header.documents' },
   { value: 'retrieval', icon: MessageSquareTextIcon, labelKey: 'header.retrieval' },
-  { value: 'knowledge-graph', icon: NetworkIcon, labelKey: 'header.knowledgeGraph' }
+  { value: 'knowledge-graph', icon: NetworkIcon, labelKey: 'header.knowledgeGraph' },
+  { value: 'admin', icon: ShieldCheckIcon, labelKey: 'header.admin', adminOnly: true }
 ]
 
 export default function Sidebar() {
   const { t } = useTranslation()
   const { role } = useAuthStore()
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [adminOpen, setAdminOpen] = useState(false)
 
   const language = useSettingsStore.use.language()
   const setLanguage = useSettingsStore.use.setLanguage()
@@ -84,7 +86,7 @@ export default function Sidebar() {
         {/* Navigation */}
         <nav className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
           <ul className="flex flex-col gap-1">
-            {TABS.map(({ value, icon: Icon, labelKey }) => {
+            {TABS.filter((tab) => !('adminOnly' in tab && tab.adminOnly) || canManageUsers(role)).map(({ value, icon: Icon, labelKey }) => {
               const item = (
                 <button
                   type="button"
@@ -204,28 +206,9 @@ export default function Sidebar() {
                   </Select>
                 </div>
 
-                {/* User administration (admin only) */}
-                {canManageUsers(role) && (
-                  <>
-                    <div className="border-t -mx-2" />
-                    <button
-                      type="button"
-                      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground transition-colors hover:bg-accent"
-                      onClick={() => {
-                        setSettingsOpen(false)
-                        setAdminOpen(true)
-                      }}
-                    >
-                      <UsersIcon className="size-4" aria-hidden="true" />
-                      <span>{t('header.userAdmin', 'User administration')}</span>
-                    </button>
-                  </>
-                )}
               </div>
             </PopoverContent>
           </Popover>
-
-          <AdminUserDialog open={adminOpen} onOpenChange={setAdminOpen} />
         </div>
       </aside>
     </TooltipProvider>

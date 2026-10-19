@@ -1,8 +1,9 @@
 /**
- * AdminUserDialog — user & workspace-permission administration.
+ * AdminUserPanel — user & workspace-permission administration, inline form.
  *
- * Backed by the /admin/users endpoints (RBAC). Only reachable for admins
- * (canManageUsers); the server enforces the same gate independently.
+ * Same backend (/admin/users, RBAC) as the old dialog variant, but rendered
+ * directly on the 系统管理 page instead of inside a modal. Only admins can
+ * reach it (canManageUsers); the server enforces the same gate.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
@@ -11,7 +12,6 @@ import { Loader2, Plus, Trash2, KeyRound, ShieldCheck } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
-// Removed unused Badge import (replaced by StatusBadge)
 import {
   Table,
   TableBody,
@@ -25,7 +25,6 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/Dialog'
@@ -56,14 +55,9 @@ const ROLE_STYLES: Record<string, string> = {
   guest: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
 }
 
-interface Props {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-}
-
 const toLabel = (name: string) => (name === '' ? 'default' : name)
 
-export default function AdminUserDialog({ open, onOpenChange }: Props) {
+export default function AdminUserPanel() {
   const { t } = useTranslation()
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(false)
@@ -87,7 +81,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       setLoading(true)
       setUsers(await listUsers())
     } catch (err) {
-      console.error('[AdminUserDialog] load users failed:', err)
+      console.error('[AdminUserPanel] load users failed:', err)
       toast.error(t('admin.loadUsersError'))
     } finally {
       setLoading(false)
@@ -95,18 +89,17 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
   }, [t])
 
   useEffect(() => {
-    if (!open) return
     // Defer past the synchronous effect body (react-hooks/set-state-in-effect).
     const timer = setTimeout(() => void loadUsers(), 0)
     return () => clearTimeout(timer)
-  }, [open, loadUsers])
+  }, [loadUsers])
 
   const loadPermissions = useCallback(async (user: AdminUser) => {
     setPermLoading(true)
     try {
       setPermissions(await listUserPermissions(user.username))
     } catch (err) {
-      console.error('[AdminUserDialog] load permissions failed:', err)
+      console.error('[AdminUserPanel] load permissions failed:', err)
       toast.error(t('admin.loadPermsError'))
     } finally {
       setPermLoading(false)
@@ -127,7 +120,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       setNewPassword('')
       await loadUsers()
     } catch (err) {
-      console.error('[AdminUserDialog] create failed:', err)
+      console.error('[AdminUserPanel] create failed:', err)
       toast.error(t('admin.createError'))
     } finally {
       setCreating(false)
@@ -140,7 +133,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       toast.success(t('admin.updateSuccess', { username: user.username }))
       await loadUsers()
     } catch (err) {
-      console.error('[AdminUserDialog] update failed:', err)
+      console.error('[AdminUserPanel] update failed:', err)
       toast.error(t('admin.updateError'))
     }
   }
@@ -151,7 +144,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       toast.success(t('admin.deleteSuccess', { username: user.username }))
       await loadUsers()
     } catch (err) {
-      console.error('[AdminUserDialog] delete failed:', err)
+      console.error('[AdminUserPanel] delete failed:', err)
       toast.error(t('admin.deleteError'))
     }
   }
@@ -163,7 +156,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
 
   const handleAddPermission = async () => {
     if (!permUser) return
-    const ws = newPermWs.trim() === '' ? '' : newPermWs.trim()
+    const ws = newPermWs.trim()
     try {
       setPermBusy(true)
       await setUserPermission(permUser.username, ws, newPermLevel)
@@ -171,7 +164,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       setNewPermWs('')
       await loadPermissions(permUser)
     } catch (err) {
-      console.error('[AdminUserDialog] set permission failed:', err)
+      console.error('[AdminUserPanel] set permission failed:', err)
       toast.error(t('admin.grantError'))
     } finally {
       setPermBusy(false)
@@ -186,7 +179,7 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
       toast.success(t('admin.revokeSuccess', { name: toLabel(workspace) }))
       await loadPermissions(permUser)
     } catch (err) {
-      console.error('[AdminUserDialog] delete permission failed:', err)
+      console.error('[AdminUserPanel] delete permission failed:', err)
       toast.error(t('admin.revokeError'))
     } finally {
       setPermBusy(false)
@@ -195,134 +188,117 @@ export default function AdminUserDialog({ open, onOpenChange }: Props) {
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{t('admin.title')}</DialogTitle>
-            <DialogDescription>
-              {t('admin.description')}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-4">
-            {/* Create user */}
-            <div className="rounded-md border p-3">
-              <div className="mb-2 flex items-center gap-2 text-sm font-medium">
-                <Plus className="h-4 w-4" /> {t('admin.createUser')}
-              </div>
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="min-w-[140px] flex-1">
-                  <Input
-                    placeholder={t('admin.usernamePlaceholder')}
-                    value={newUsername}
-                    onChange={(e) => setNewUsername(e.target.value)}
-                  />
-                </div>
-                <div className="min-w-[140px] flex-1">
-                  <Input
-                    type="password"
-                    placeholder={t('admin.passwordPlaceholder')}
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
-                  />
-                </div>
-                <div className="w-[120px]">
-                  <Select value={newRole} onValueChange={setNewRole}>
-                    <SelectTrigger className="h-9">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="admin">admin</SelectItem>
-                      <SelectItem value="manager">manager</SelectItem>
-                      <SelectItem value="viewer">viewer</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button onClick={handleCreate} disabled={creating}>
-                  {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.create')}
-                </Button>
-              </div>
-            </div>
-
-            {/* Users table */}
-            <div className="max-h-72 overflow-auto rounded-md border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t('admin.colUsername')}</TableHead>
-                    <TableHead>{t('admin.colRole')}</TableHead>
-                    <TableHead>{t('admin.colStatus')}</TableHead>
-                    <TableHead className="text-right">{t('admin.colActions')}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {loading ? (
-                    <TableRow>
-                      <TableCell colSpan={4} className="py-6 text-center">
-                        <Loader2 className="mx-auto h-5 w-5 animate-spin" />
-                      </TableCell>
-                    </TableRow>
-                  ) : users.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={4} className="py-6 text-center text-sm text-gray-500">
-                        {t('admin.empty')}
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    users.map((user) => (
-                      <TableRow key={user.username}>
-                        <TableCell className="font-medium">{user.username}</TableCell>
-                        <TableCell>
-                          <StatusBadge status={user.role as any} showIcon={false}>
-                            {user.role}
-                          </StatusBadge>
-                        </TableCell>
-                        <TableCell>
-                          <StatusBadge status={user.enabled ? 'completed' : 'failed'}>
-                            {user.enabled ? t('admin.enabled') : t('admin.disabled')}
-                          </StatusBadge>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-1">
-                            <Button
-                              variant="outline" size="sm"
-                              onClick={() => openPermissions(user)}
-                              tooltip={t('admin.permTooltip')}
-                            >
-                              <KeyRound className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="outline" size="sm"
-                              onClick={() => handleUpdate(user, { enabled: !user.enabled })}
-                              tooltip={user.enabled ? t('admin.disable') : t('admin.enable')}
-                            >
-                              <ShieldCheck className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="outline" size="sm"
-                              onClick={() => handleDelete(user)}
-                              tooltip={t('admin.deleteUser')}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-red-500" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </div>
+      <div className="space-y-4">
+        {/* Create user */}
+        <div className="rounded-md border p-3">
+          <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+            <Plus className="h-4 w-4" /> {t('admin.createUser')}
           </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => onOpenChange(false)}>
-              {t('common.close')}
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[140px] flex-1">
+              <Input
+                placeholder={t('admin.usernamePlaceholder')}
+                value={newUsername}
+                onChange={(e) => setNewUsername(e.target.value)}
+              />
+            </div>
+            <div className="min-w-[140px] flex-1">
+              <Input
+                type="password"
+                placeholder={t('admin.passwordPlaceholder')}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
+              />
+            </div>
+            <div className="w-[120px]">
+              <Select value={newRole} onValueChange={setNewRole}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="admin">admin</SelectItem>
+                  <SelectItem value="manager">manager</SelectItem>
+                  <SelectItem value="viewer">viewer</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <Button onClick={handleCreate} disabled={creating}>
+              {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.create')}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+        </div>
+
+        {/* Users table */}
+        <div className="rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{t('admin.colUsername')}</TableHead>
+                <TableHead>{t('admin.colRole')}</TableHead>
+                <TableHead>{t('admin.colStatus')}</TableHead>
+                <TableHead className="text-right">{t('admin.colActions')}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {loading ? (
+                <TableRow>
+                  <TableCell colSpan={4} className="py-6 text-center">
+                    <Loader2 className="mx-auto h-5 w-5 animate-spin" />
+                  </TableCell>
+                </TableRow>
+              ) : users.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={4} className="py-6 text-center text-sm text-gray-500">
+                    {t('admin.empty')}
+                  </TableCell>
+                </TableRow>
+              ) : (
+                users.map((user) => (
+                  <TableRow key={user.username}>
+                    <TableCell className="font-medium">{user.username}</TableCell>
+                    <TableCell>
+                      <StatusBadge status={user.role as any} showIcon={false}>
+                        {user.role}
+                      </StatusBadge>
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge status={user.enabled ? 'completed' : 'failed'}>
+                        {user.enabled ? t('admin.enabled') : t('admin.disabled')}
+                      </StatusBadge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          variant="outline" size="sm"
+                          onClick={() => openPermissions(user)}
+                          tooltip={t('admin.permTooltip')}
+                        >
+                          <KeyRound className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="outline" size="sm"
+                          onClick={() => handleUpdate(user, { enabled: !user.enabled })}
+                          tooltip={user.enabled ? t('admin.disable') : t('admin.enable')}
+                        >
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="outline" size="sm"
+                          onClick={() => handleDelete(user)}
+                          tooltip={t('admin.deleteUser')}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-red-500" />
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
 
       {/* Workspace-permission sub-dialog */}
       <Dialog open={permUser !== null} onOpenChange={(o) => { if (!o) setPermUser(null) }}>
