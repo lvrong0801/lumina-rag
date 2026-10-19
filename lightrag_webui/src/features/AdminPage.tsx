@@ -1,18 +1,15 @@
 /**
  * AdminPage — 系统管理 page (admin-only sidebar tab).
  *
- * Sub-tabs, modelled on the cogent-rag reference layout:
+ * Sub-tabs:
  *   偏好设置  — language + theme (same settings as the sidebar popover)
- *   用户管理  — AdminUserPanel (/admin/users)
- *   角色划分  — role/permission matrix with live member counts
+ *   用户管理  — AdminUserPanel (/admin/users), incl. role assignment
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
 import {
   SettingsIcon,
   UsersIcon,
-  ShieldCheckIcon,
   LockIcon,
 } from 'lucide-react'
 
@@ -20,13 +17,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from '@/components/ui/Table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import AdminUserPanel from '@/components/admin/AdminUserPanel'
 
-import { listUsers, type AdminUser } from '@/api/lightrag'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/state'
 import { canManageUsers } from '@/lib/rbac'
@@ -107,111 +100,11 @@ function PreferencesPanel() {
   )
 }
 
-// ─── Roles sub-tab ───────────────────────────────────────────────────────────
-const ROLE_ORDER = ['admin', 'manager', 'viewer', 'guest'] as const
-
-const ROLE_STYLES: Record<string, string> = {
-  admin: 'bg-primary/10 text-primary',
-  manager: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300',
-  viewer: 'bg-slate-100 text-slate-600 dark:bg-slate-800/60 dark:text-slate-300',
-  guest: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-}
-
-function RolesPanel() {
-  const { t } = useTranslation()
-  const [users, setUsers] = useState<AdminUser[]>([])
-  const [loading, setLoading] = useState(false)
-
-  const load = useCallback(async () => {
-    try {
-      setLoading(true)
-      setUsers(await listUsers())
-    } catch (err) {
-      console.error('[AdminPage/Roles] load users failed:', err)
-      toast.error(t('admin.loadUsersError'))
-    } finally {
-      setLoading(false)
-    }
-  }, [t])
-
-  useEffect(() => {
-    const timer = setTimeout(() => void load(), 0)
-    return () => clearTimeout(timer)
-  }, [load])
-
-  return (
-    <div className="max-w-3xl space-y-4">
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">{t('adminPage.roles.globalTitle')}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-28">{t('adminPage.roles.role')}</TableHead>
-                <TableHead>{t('adminPage.roles.description')}</TableHead>
-                <TableHead className="w-20 text-right">{t('adminPage.roles.members')}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {ROLE_ORDER.map((role) => (
-                <TableRow key={role}>
-                  <TableCell>
-                    <span className={cn('rounded px-1.5 py-0.5 text-xs font-medium', ROLE_STYLES[role])}>
-                      {role}
-                    </span>
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {t(`adminPage.roles.desc.${role}`)}
-                  </TableCell>
-                  <TableCell className="text-right text-sm tabular-nums">
-                    {loading ? '…' : users.filter((u) => u.role === role).length}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">{t('adminPage.roles.accessTitle')}</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-28">{t('adminPage.roles.level')}</TableHead>
-                <TableHead>{t('adminPage.roles.description')}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {(['read', 'write', 'admin'] as const).map((level) => (
-                <TableRow key={level}>
-                  <TableCell>
-                    <span className={cn('rounded px-1.5 py-0.5 text-xs font-medium', ROLE_STYLES[level === 'read' ? 'guest' : level === 'write' ? 'manager' : 'admin'])}>
-                      {level}
-                    </span>
-                  </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
-                    {t(`adminPage.roles.accessDesc.${level}`)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-    </div>
-  )
-}
-
 // ─── Page ────────────────────────────────────────────────────────────────────
 export default function AdminPage() {
   const { t } = useTranslation()
   const { role } = useAuthStore()
+  const [subTab, setSubTab] = useState<'preferences' | 'users'>('preferences')
 
   if (!canManageUsers(role)) {
     return (
@@ -229,7 +122,10 @@ export default function AdminPage() {
           <h1 className="text-2xl font-bold tracking-tight">{t('adminPage.title')}</h1>
           <p className="mt-1 text-sm text-muted-foreground">{t('adminPage.subtitle')}</p>
         </div>
-        <Tabs defaultValue="preferences" className="w-full">
+        {/* Content is rendered conditionally instead of nested TabsContent:
+            a force-mounted nested panel could re-show itself while the outer
+            (inactive) panel is hidden, and inactive panels keep layout space. */}
+        <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="w-full">
           <TabsList className="mb-4">
             <TabsTrigger value="preferences" className="gap-1.5">
               <SettingsIcon className="size-4" />{t('adminPage.tabs.preferences')}
@@ -237,19 +133,8 @@ export default function AdminPage() {
             <TabsTrigger value="users" className="gap-1.5">
               <UsersIcon className="size-4" />{t('adminPage.tabs.users')}
             </TabsTrigger>
-            <TabsTrigger value="roles" className="gap-1.5">
-              <ShieldCheckIcon className="size-4" />{t('adminPage.tabs.roles')}
-            </TabsTrigger>
           </TabsList>
-          <TabsContent value="preferences" className="h-auto min-h-0">
-            <PreferencesPanel />
-          </TabsContent>
-          <TabsContent value="users" className="h-auto min-h-0">
-            <AdminUserPanel />
-          </TabsContent>
-          <TabsContent value="roles" className="h-auto min-h-0">
-            <RolesPanel />
-          </TabsContent>
+          {subTab === 'preferences' ? <PreferencesPanel /> : <AdminUserPanel />}
         </Tabs>
       </div>
     </div>

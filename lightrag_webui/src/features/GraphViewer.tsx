@@ -1,4 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
+import { FolderOpen } from 'lucide-react'
 // import { MiniMap } from '@react-sigma/minimap'
 import { SigmaContainer, useRegisterEvents, useSigma } from '@react-sigma/core'
 import { Settings as SigmaSettings } from 'sigma/settings'
@@ -143,6 +145,7 @@ const GraphEvents = () => {
 }
 
 const GraphViewer = () => {
+  const { t } = useTranslation()
   const sigmaRef = useRef<any>(null)
   const prevTheme = useRef<string>('')
 
@@ -152,6 +155,9 @@ const GraphViewer = () => {
   const isFetching = useGraphStore.use.isFetching()
   const isLayoutComputing = useGraphStore.use.isLayoutComputing()
 
+  // The graph API call already scopes data to this workspace via the axios
+  // LIGHTRAG-WORKSPACE header; the badge just makes that scope visible.
+  const currentWorkspace = useSettingsStore.use.currentWorkspace()
   const showPropertyPanel = useSettingsStore.use.showPropertyPanel()
   const showNodeSearchBar = useSettingsStore.use.showNodeSearchBar()
   const enableNodeDrag = useSettingsStore.use.enableNodeDrag()
@@ -265,6 +271,13 @@ const GraphViewer = () => {
         <FocusOnNode node={autoFocusedNode} move={moveToSelectedNode} />
 
         <div className="absolute top-2 left-2 flex items-start gap-2">
+          <div
+            className="bg-background/70 flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-xs font-medium shadow-md backdrop-blur-sm"
+            title={t('workspaces.current')}
+          >
+            <FolderOpen className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+            <span className="max-w-32 truncate">{currentWorkspace === '' ? 'default' : currentWorkspace}</span>
+          </div>
           <GraphLabels />
           {showNodeSearchBar && !isThemeSwitching && (
             <GraphSearch

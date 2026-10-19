@@ -78,6 +78,7 @@
     "createTitle": "Create workspace",
     "createDesc": "Letters, digits, underscores and hyphens only.",
     "namePlaceholder": "workspace-name",
+    "current": "Current workspace",
     "deleteTitle": "Delete workspace",
     "deleteDesc": "All data in workspace \"{{name}}\" will be permanently deleted. This action cannot be undone.",
     "cannotDeleteDefault": "Cannot delete default workspace",
@@ -181,27 +182,7 @@
     "forbidden": "Only admins can access the system administration page.",
     "tabs": {
       "preferences": "Preferences",
-      "users": "Users",
-      "roles": "Roles"
-    },
-    "roles": {
-      "globalTitle": "Global Roles",
-      "accessTitle": "Workspace Access Levels",
-      "role": "Role",
-      "level": "Level",
-      "description": "Description",
-      "members": "Members",
-      "desc": {
-        "admin": "Full access: manage users & grants, create/delete workspaces, read-write everything",
-        "manager": "Read-write on workspaces granted write/admin; cannot manage users or workspaces",
-        "viewer": "Read-only by default; can be granted write/admin per workspace",
-        "guest": "Login-free open mode (when auth is disabled)"
-      },
-      "accessDesc": {
-        "read": "Read-only browsing of the workspace",
-        "write": "Upload, retry, categorize and edit workspace content",
-        "admin": "Full rights including delete-level operations on workspace data"
-      }
+      "users": "Users"
     }
   },
   "documentPanel": {

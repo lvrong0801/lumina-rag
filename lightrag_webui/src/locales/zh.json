@@ -78,6 +78,7 @@
     "createTitle": "新建工作区",
     "createDesc": "仅限字母、数字、下划线和连字符。",
     "namePlaceholder": "工作区名称",
+    "current": "当前工作区",
     "deleteTitle": "删除工作区",
     "deleteDesc": "工作区“{{name}}”中的全部数据将被永久删除，此操作不可撤销。",
     "cannotDeleteDefault": "默认工作区不可删除",
@@ -181,27 +182,7 @@
     "forbidden": "仅管理员可以访问系统管理页。",
     "tabs": {
       "preferences": "偏好设置",
-      "users": "用户管理",
-      "roles": "角色划分"
-    },
-    "roles": {
-      "globalTitle": "全局角色",
-      "accessTitle": "工作区权限级别",
-      "role": "角色",
-      "level": "级别",
-      "description": "说明",
-      "members": "用户数",
-      "desc": {
-        "admin": "完全访问：管理用户与授权、新建/删除工作区，读写所有数据",
-        "manager": "在获授 write/admin 的工作区可读写；不能管理用户与工作区",
-        "viewer": "默认只读；可按工作区授予 write/admin 获得写权限",
-        "guest": "免登录开放模式（认证关闭时）"
-      },
-      "accessDesc": {
-        "read": "只读浏览该工作区",
-        "write": "可上传、重试、分类与编辑该工作区内容",
-        "admin": "完整权限，含该工作区数据的删除级操作"
-      }
+      "users": "用户管理"
     }
   },
   "documentPanel": {

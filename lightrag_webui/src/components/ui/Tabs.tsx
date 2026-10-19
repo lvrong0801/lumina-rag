@@ -43,7 +43,11 @@ const TabsContent = React.forwardRef<
     ref={ref}
     className={cn(
       'ring-offset-background focus-visible:ring-ring focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none',
-      'data-[state=inactive]:invisible data-[state=active]:visible',
+      // Only pin the inactive state. An explicit active:visible would override
+      // an ancestor tab panel's `invisible` (visibility inherits but a visible
+      // descendant can re-show itself), leaking nested-tab content onto
+      // whichever outer tab is displayed.
+      'data-[state=inactive]:invisible',
       'h-full w-full',
       className
     )}
