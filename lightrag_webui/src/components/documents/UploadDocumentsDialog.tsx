@@ -74,7 +74,7 @@ export default function UploadDocumentsDialog({
   onDocumentsUploaded,
   onUploadBatchAccepted
 }: UploadDocumentsDialogProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const [open, setOpen] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [progresses, setProgresses] = useState<Record<string, number>>({})
@@ -252,8 +252,14 @@ export default function UploadDocumentsDialog({
         return newErrors;
       });
 
-      // Show uploading toast
-      const toastId = toast.loading(t('documentPanel.uploadDocuments.batch.uploading'))
+      // Overwrite/incremental purges the target document(s) synchronously
+      // server-side (graph purge + cached rebuild) before the new file is
+      // even read — that request can legitimately pin for minutes, so the
+      // toast wording must not sound like a quick file transfer.
+      const isReplaceMode = mode !== 'new'
+      const toastId = toast.loading(
+        t(`documentPanel.uploadDocuments.batch.${isReplaceMode ? 'replacing' : 'uploading'}`)
+      )
 
       try {
         // Track errors locally to ensure we have the final state
@@ -279,13 +285,24 @@ export default function UploadDocumentsDialog({
         );
 
         // Upload files in sequence, not parallel
-        for (const file of sortedFiles) {
+        for (let i = 0; i < sortedFiles.length; i++) {
+          const file = sortedFiles[i]
           try {
             // Initialize upload progress
             setProgresses((pre) => ({
               ...pre,
               [file.name]: 0
             }))
+            // The long-lived batch toast names the file currently in flight,
+            // so a multi-minute overwrite does not look frozen.
+            toast.loading(
+              t(`documentPanel.uploadDocuments.batch.${isReplaceMode ? 'replacingFile' : 'uploadingFile'}`, {
+                name: file.name,
+                index: i + 1,
+                total: sortedFiles.length
+              }),
+              { id: toastId }
+            )
 
             const result = await uploadDocument(
               file,
@@ -320,11 +337,19 @@ export default function UploadDocumentsDialog({
             let errorMsg = errorMessage(err)
             const duplicateFileMsg = t('documentPanel.uploadDocuments.fileUploader.duplicateFile')
 
-            // If it's an axios error with response data, try to extract more detailed error info
-            if (err && typeof err === 'object' && 'response' in err) {
-              const axiosError = err as { response?: { status: number, data?: { detail?: string } } }
-              const status = axiosError.response?.status
-              const detail = axiosError.response?.data?.detail
+            // The response interceptor converts axios errors into
+            // HttpRequestError — status on a `.status` property, the raw
+            // "403 Forbidden\n{...detail json}\nurl" string as .message —
+            // so read BOTH shapes; an adapter-level error (only reachable in
+            // tests or pre-interceptor code) still carries `.response`.
+            const status =
+              (err as { status?: number } | null)?.status ??
+              (err as { response?: { status?: number } } | null)?.response?.status
+            const detail = (
+              err as { response?: { data?: { detail?: string } } } | null
+            )?.response?.data?.detail
+
+            if (status !== undefined) {
               if (status === 409) {
                 // Server now rejects same-name uploads with HTTP 409 instead of
                 // returning a 200 ``status="duplicated"`` payload.  Map the most
@@ -332,14 +357,21 @@ export default function UploadDocumentsDialog({
                 // dedicated "duplicate file" UI affordance, and surface other
                 // 409 reasons (pipeline busy / scanning) verbatim from the
                 // server detail so users can tell why they were rejected.
-                if (
-                  typeof detail === 'string' &&
-                  (/already contains/i.test(detail) || /Status:/i.test(detail))
-                ) {
+                if (/already contains/i.test(detail ?? errorMsg) || /Status:/i.test(detail ?? errorMsg)) {
                   errorMsg = duplicateFileMsg
                 } else {
                   errorMsg = detail || errorMsg
                 }
+              } else if (status === 403) {
+                // An overwrite's synchronous target purge is refused while the
+                // pipeline is busy with a non-deletion job; translate the
+                // refusal into a retry hint instead of the raw server wording.
+                // HttpRequestError drops `.response`, so the pattern check
+                // runs against the message when no detail survived.
+                const raw = typeof detail === 'string' ? detail : errorMsg
+                errorMsg = /not a document deletion job|Pipeline is busy/i.test(raw)
+                  ? t('documentPanel.uploadDocuments.batch.pipelineBusy')
+                  : detail || errorMsg
               } else if (status === 400 || status === 404 || status === 413 || status === 429 || status === 503) {
                 // 400 invalid request, 404 target document missing, 413 body/file
                 // too large, 429 pipeline at capacity, 503 document storage
@@ -405,9 +437,10 @@ export default function UploadDocumentsDialog({
     <Dialog
       open={open}
       onOpenChange={(nextOpen) => {
-        if (isUploading) {
-          return
-        }
+        // Closing stays possible mid-upload on purpose: an overwrite request's
+        // synchronous server-side purge can run for minutes, and trapping the
+        // dialog leaves the user no way to watch the document list. The batch
+        // keeps running after close and its toast keeps reporting.
         if (nextOpen) {
           // Enter loading synchronously so the first open render already has
           // the uploader disabled — no window where a hinted file could start
@@ -429,7 +462,14 @@ export default function UploadDocumentsDialog({
           <UploadIcon /> {t('documentPanel.uploadDocuments.button')}
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-xl" onCloseAutoFocus={(e) => e.preventDefault()}>
+      {/* grid-cols-1 (=minmax(0,1fr)): stops the nowrap formats line from sizing the auto track to max-content and pushing the dropzone off-center */}
+      {/* max-h + overflow-y-auto: on short viewports (laptop) the mode list +
+          advanced panel would otherwise outgrow the fixed-position dialog and
+          clip below the screen edge with no way to scroll. */}
+      <DialogContent
+        className="grid-cols-1 sm:max-w-xl max-h-[calc(100vh-2rem)] overflow-y-auto"
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         <DialogHeader>
           <DialogTitle>{t('documentPanel.uploadDocuments.title')}</DialogTitle>
           {/* sr-only: the dropzone already carries the visual "drag or click"
@@ -505,7 +545,20 @@ export default function UploadDocumentsDialog({
         <FileUploader
           maxFileCount={mode === 'new' ? Infinity : 1}
           maxSize={200 * 1024 * 1024}
-          description={t('documentPanel.uploadDocuments.fileTypes', {
+          // Headline a handful of everyday formats + the total count; the full
+          // capability list moves to the tooltip so the dropzone stays tidy.
+          description={(() => {
+            const allExts = (
+              uploaderInputs.acceptedExtensions ?? flattenAcceptExtensions(supportedFileTypes)
+            ).map((ext) => ext.replace(/^\./, '').toUpperCase())
+            const CURATED = ['PDF', 'DOCX', 'PPTX', 'XLSX', 'TXT', 'MD', 'CSV', 'EPUB', 'PNG', 'JPG']
+            const headline = CURATED.filter((ext) => allExts.includes(ext))
+            return t('documentPanel.uploadDocuments.supportedTypesSummary', {
+              types: headline.join(i18n.language.startsWith('zh') ? '、' : ', '),
+              count: allExts.length
+            })
+          })()}
+          descriptionTooltip={t('documentPanel.uploadDocuments.fileTypes', {
             types: formatFileTypesLabel(
               uploaderInputs.acceptedExtensions ?? flattenAcceptExtensions(supportedFileTypes)
             )

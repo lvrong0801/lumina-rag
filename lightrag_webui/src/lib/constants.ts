@@ -104,9 +104,8 @@ export const supportedFileTypes = {
 }
 
 export const SiteInfo = {
-  name: 'LightRAG',
-  home: '/',
-  github: 'https://github.com/HKUDS/LightRAG'
+  name: 'Lumina',
+  home: '/'
 }
 
 // --- Graph layout performance thresholds ------------------------------------

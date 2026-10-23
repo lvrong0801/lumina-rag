@@ -65,7 +65,7 @@ export default function Sidebar() {
           {!collapsed && (
             <a href={entryHomeHref(window.location.pathname)} className="flex min-w-0 items-center gap-2">
               <ZapIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
-              <span className="truncate text-base font-semibold tracking-tight">LightRAG</span>
+              <span className="truncate text-base font-semibold tracking-tight">Lumina</span>
             </a>
           )}
           <Button

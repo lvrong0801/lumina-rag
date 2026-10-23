@@ -153,6 +153,12 @@ const backendAdapter = async (config: any) => {
     return respond(config, { status: 'scanning_started', message: 'ok' })
   }
 
+  // CategorySidebar mounts with the page and maps the response immediately; an
+  // unmodelled endpoint falls through to `{}` and crashes the whole tree.
+  if (url.endsWith('/documents/categories')) {
+    return respond(config, { categories: [], uncategorized_count: 0, total_count: 0 })
+  }
+
   if (url.endsWith('/documents/delete_document')) {
     backend.deleteCalls += 1
     const docIds: string[] = JSON.parse(config.data ?? '{}').doc_ids ?? []

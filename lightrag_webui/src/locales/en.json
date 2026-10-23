@@ -293,11 +293,16 @@
       },
       "batch": {
         "uploading": "Uploading files...",
+        "replacing": "Replacing existing documents (delete + rebuild can take minutes)…",
+        "uploadingFile": "Uploading {{name}} ({{index}}/{{total}})…",
+        "replacingFile": "Replacing old document and uploading {{name}} ({{index}}/{{total}})…",
+        "pipelineBusy": "The pipeline is busy with another task; overwrite is refused for now — please retry shortly",
         "success": "Files uploaded successfully",
         "error": "Some files failed to upload"
       },
       "generalError": "Upload Failed\n{{error}}",
       "fileTypes": "Supported types: {{types}}",
+      "supportedTypesSummary": "Supports {{types}} and {{count}} formats in total (hover for the full list)",
       "advancedSettings": {
         "title": "Advanced Processing Options",
         "serverDefault": "Server default",

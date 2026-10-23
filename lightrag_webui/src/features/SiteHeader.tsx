@@ -9,7 +9,6 @@ import { useTranslation } from 'react-i18next'
 import { navigationService } from '@/services/navigation'
 import { canManageUsers } from '@/lib/rbac'
 import { ZapIcon, LogOutIcon, BookOpenIcon } from 'lucide-react'
-import GithubIcon from '@/components/icons/GithubIcon'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/Tooltip'
 import TouchDescriptionPopover from '@/components/ui/TouchDescriptionPopover'
 
@@ -67,7 +66,7 @@ function TabsNavigation() {
 
 export default function SiteHeader() {
   const { t } = useTranslation()
-  const { isGuestMode, coreVersion, apiVersion, username, role, webuiTitle, webuiDescription } = useAuthStore()
+  const { isGuestMode, username, role, webuiTitle, webuiDescription } = useAuthStore()
   const theme = useSettingsStore.use.theme()
   // Tri-state on purpose — 'unknown' (no successful /health yet) hides the
   // entry point rather than guessing; see apiDocsCapability in stores/state.ts.
@@ -75,16 +74,6 @@ export default function SiteHeader() {
   // /docs renders Swagger UI itself; the theme query param keeps it visually
   // consistent with the WebUI ('system' falls back to the OS preference).
   const apiDocsUrl = `${backendBaseUrl}/docs?theme=${theme === 'system' ? 'auto' : theme}`
-
-  const versionDisplay = (coreVersion && apiVersion)
-    ? `${coreVersion}/${apiVersion}`
-    : null;
-
-  // Check if frontend needs rebuild (apiVersion ends with warning symbol)
-  const hasWarning = apiVersion?.endsWith('⚠️');
-  const versionTooltip = hasWarning
-    ? t('header.frontendNeedsRebuild')
-    : versionDisplay ? `v${versionDisplay}` : '';
 
   const handleLogout = () => {
     navigationService.navigateToUnauthenticated();
@@ -145,20 +134,6 @@ export default function SiteHeader() {
               {role}
             </span>
           )}
-          {versionDisplay && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="text-xs text-gray-500 dark:text-gray-400 mr-1 cursor-default">
-                    v{versionDisplay}
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">
-                  {versionTooltip}
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          )}
           {apiDocsCapability === 'available' && (
             <Button variant="ghost" size="icon" side="bottom" tooltip={t('header.apiDocs')}>
               <a href={apiDocsUrl} target="_blank" rel="noopener noreferrer">
@@ -166,11 +141,6 @@ export default function SiteHeader() {
               </a>
             </Button>
           )}
-          <Button variant="ghost" size="icon" side="bottom" tooltip={t('header.projectRepository')}>
-            <a href={SiteInfo.github} target="_blank" rel="noopener noreferrer">
-              <GithubIcon className="size-4" />
-            </a>
-          </Button>
           {!isGuestMode && (
             <Button
               variant="ghost"

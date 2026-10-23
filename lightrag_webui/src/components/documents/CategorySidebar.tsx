@@ -63,6 +63,13 @@ export default function CategorySidebar({ selectedCategory, onSelect, refreshTri
   const handleRename = async (oldName: string) => {
     const newN = renameValue.trim()
     if (!newN) return
+    if (newN === oldName) {
+      // Unchanged name: exit editing silently; a 409 "already exists" for a
+      // no-op rename reads as "cannot rename" (IME Enter hits this path).
+      setRenaming(null)
+      setRenameValue('')
+      return
+    }
     try {
       await renameCategory(oldName, newN)
       setRenaming(null)
@@ -218,7 +225,7 @@ export default function CategorySidebar({ selectedCategory, onSelect, refreshTri
                 value={renameValue}
                 onChange={(e: ChangeEvent<HTMLInputElement>) => setRenameValue(e.target.value)}
                 onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-                  if (e.key === 'Enter') handleRename(cat.name)
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleRename(cat.name)
                   if (e.key === 'Escape') { setRenaming(null); setRenameValue('') }
                 }}
                 className="h-6 flex-1 text-xs px-1"
@@ -270,7 +277,7 @@ export default function CategorySidebar({ selectedCategory, onSelect, refreshTri
             placeholder={t('categories.namePlaceholder', 'Category name')}
             value={newName}
             onChange={(e: ChangeEvent<HTMLInputElement>) => setNewName(e.target.value)}
-            onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') handleCreate() }}
+            onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleCreate() }}
           />
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setShowCreate(false)}>{t('common.cancel')}</Button>

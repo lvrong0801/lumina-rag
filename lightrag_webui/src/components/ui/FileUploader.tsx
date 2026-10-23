@@ -128,6 +128,10 @@ interface FileUploaderProps extends React.HTMLAttributes<HTMLDivElement> {
   disabled?: boolean
 
   description?: string
+
+  /** Tooltip for the description line; defaults to `description`. Use it to
+      carry the full detail when the visible copy is an abbreviation. */
+  descriptionTooltip?: string
 }
 
 function formatBytes(
@@ -165,6 +169,7 @@ function FileUploader(props: FileUploaderProps) {
     multiple = false,
     disabled = false,
     description,
+    descriptionTooltip,
     className,
     ...dropzoneProps
   } = props
@@ -329,7 +334,7 @@ function FileUploader(props: FileUploaderProps) {
           <div
             {...getRootProps()}
             className={cn(
-              'group border-muted-foreground/25 hover:bg-muted/25 relative grid h-32 w-full cursor-pointer place-items-center rounded-lg border-2 border-dashed px-5 py-2.5 text-center transition',
+              'group border-muted-foreground/25 hover:bg-muted/25 relative grid h-32 w-full cursor-pointer grid-cols-1 place-items-center rounded-lg border-2 border-dashed px-5 py-2.5 text-center transition',
               'ring-offset-background focus-visible:ring-ring focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none',
               isDragActive && 'border-muted-foreground/50',
               isDisabled && 'pointer-events-none opacity-60',
@@ -350,13 +355,13 @@ function FileUploader(props: FileUploaderProps) {
                 <div className="rounded-full border border-dashed p-2.5">
                   <Upload className="text-muted-foreground size-6" aria-hidden="true" />
                 </div>
-                <div className="flex w-full flex-col gap-px">
-                  <p className="text-muted-foreground font-medium">
+                <div className="flex w-full flex-col items-center gap-px">
+                  <p className="text-muted-foreground text-center font-medium">
                     {t('documentPanel.uploadDocuments.fileUploader.dragAndDrop')}
                   </p>
                   {description ? (
                     // One line max; the full type list stays available as a tooltip.
-                    <p className="text-muted-foreground/70 w-full truncate text-sm" title={description}>{description}</p>
+                    <p className="text-muted-foreground/70 max-w-full truncate text-center text-sm" title={descriptionTooltip ?? description}>{description}</p>
                   ) : (
                     <p className="text-muted-foreground/70 text-sm">
                       {t('documentPanel.uploadDocuments.fileUploader.uploadDescription', {

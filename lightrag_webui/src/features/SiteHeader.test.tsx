@@ -46,7 +46,7 @@ describe('admin header deployment identity', () => {
     // identically and silently strand keyboard users.
     await user.tab()
 
-    const link = screen.getByRole('link', { name: /LightRAG/ })
+    const link = screen.getByRole('link', { name: /Lumina/ })
     // Compared as a boolean: a failing `toBe(element)` asks Bun to serialise
     // the DOM node, which costs ~10x the runtime and buries the reason.
     expect(document.activeElement === link).toBe(true)
@@ -58,10 +58,10 @@ describe('admin header deployment identity', () => {
     setDeployment('Acme KB', null)
     renderHeader()
 
-    const link = screen.getByRole('link', { name: /LightRAG/ })
+    const link = screen.getByRole('link', { name: /Lumina/ })
     // Both inside the link, so the whole brand block is one target — the
     // title is not a separate, unfocusable label beside it.
-    expect(within(link).getByText('LightRAG')).toBeInTheDocument()
+    expect(within(link).getByText('Lumina')).toBeInTheDocument()
     expect(within(link).getByText('Acme KB')).toBeInTheDocument()
   })
 
@@ -69,10 +69,10 @@ describe('admin header deployment identity', () => {
     setDeployment(null, null)
     renderHeader()
 
-    const link = screen.getByRole('link', { name: /LightRAG/ })
-    expect(within(link).getByText('LightRAG')).toBeInTheDocument()
+    const link = screen.getByRole('link', { name: /Lumina/ })
+    expect(within(link).getByText('Lumina')).toBeInTheDocument()
     // No empty separator or blank label left behind.
-    expect(link).toHaveTextContent(/^LightRAG$/)
+    expect(link).toHaveTextContent(/^Lumina$/)
   })
 
   test('offers the touch fallback only when there is a description to show', () => {
@@ -95,7 +95,7 @@ describe('admin header deployment identity', () => {
 
     // Document-relative: under a reverse-proxy prefix or the dev server's
     // file-per-entry layout this still resolves to THIS entry (entryHomeHref).
-    const link = screen.getByRole('link', { name: /LightRAG/ })
+    const link = screen.getByRole('link', { name: /Lumina/ })
     expect(link.getAttribute('href')).toBe('./')
   })
 })

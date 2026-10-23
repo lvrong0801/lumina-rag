@@ -7,7 +7,6 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableFooter,
   TableHead,
   TableHeader,
   TableRow
@@ -1527,22 +1526,22 @@ export default function DocumentManager() {
   ]);
 
   return (
-    <div className="flex h-full min-h-0 gap-3 p-3">
+    <div className="flex h-full min-h-0 gap-2 p-2 lg:gap-3 lg:p-3">
       <CategorySidebar
         selectedCategory={selectedCategory}
         onSelect={(cat) => { setSelectedCategory(cat); setPagination(prev => ({ ...prev, page: 1 })); fetchDocuments(); }}
         refreshTrigger={categoryRefreshTrigger}
       />
       <Card className="!overflow-hidden flex flex-col h-full min-h-0 flex-1">
-      <CardHeader className="py-2 px-6">
-        <div className="flex items-center justify-between">
+      <CardHeader className="py-2 px-4 lg:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <CardTitle className="text-lg">{t('documentPanel.documentManager.title')}</CardTitle>
           <WorkspaceSelector onWorkspaceChange={() => window.location.reload()} />
         </div>
       </CardHeader>
-      <CardContent className="flex-1 flex flex-col min-h-0 overflow-auto">
-        <div className="flex justify-between items-center gap-2 mb-2">
-          <div className="flex gap-2">
+      <CardContent className="flex-1 flex flex-col min-h-0 overflow-auto px-4 lg:px-6">
+        <div className="flex flex-wrap justify-between items-center gap-2 mb-2">
+          <div className="flex flex-wrap gap-2">
             {canWriteDocs && (
               <Button
                 variant="outline"
@@ -1568,7 +1567,7 @@ export default function DocumentManager() {
             </Button>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             {canWriteDocs && isSelectionMode && (
               <DeleteDocumentsDialog
                 selectedDocIds={selectedDocIds}
@@ -1615,10 +1614,10 @@ export default function DocumentManager() {
 
         <Card className="flex-1 flex flex-col border rounded-md min-h-0 mb-2">
           <CardHeader className="flex-none py-2 px-4">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-wrap justify-between items-center gap-2">
               <CardTitle>{t('documentPanel.documentManager.uploadedTitle')}</CardTitle>
-              <div className="flex items-center gap-2">
-                <div className="flex gap-1" dir={i18n.dir()}>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap gap-1" dir={i18n.dir()}>
                   <Button
                     size="sm"
                     variant={statusFilter === 'all' ? 'secondary' : 'outline'}
@@ -1761,7 +1760,10 @@ export default function DocumentManager() {
             )}
             {hasLoadedDocuments && pagination.total_count > 0 && (
               <div className="absolute inset-0 flex min-h-0 flex-col p-0">
-                <div className="absolute inset-[-1px] flex flex-col p-0 border rounded-md border-gray-200 dark:border-gray-700 overflow-hidden">
+                  {/* The first DOM child is the Table component's own scrollable wrapper
+                      (TooltipProvider renders no element); it must grow into the card so the
+                      table region fills tall viewports instead of leaving dead space below. */}
+                <div className="absolute inset-[-1px] flex flex-col p-0 border rounded-md border-gray-200 dark:border-gray-700 overflow-hidden [&>div:first-child]:min-h-0 [&>div:first-child]:flex-1">
                   <TooltipProvider>
                     <Table className="w-full">
                       <TableHeader className="sticky top-0 bg-background z-10 shadow-sm">
@@ -1821,7 +1823,7 @@ export default function DocumentManager() {
                       <TableBody className="text-sm overflow-auto">
                         {filteredAndSortedDocs.map((doc) => (
                           <TableRow key={doc.id}>
-                            <TableCell className="truncate font-mono overflow-visible max-w-[250px] min-w-[160px]">
+                            <TableCell className="truncate font-mono overflow-visible max-w-[250px] min-w-[120px] lg:min-w-[160px]">
                               {showFileName ? (
                                 <>
                                   <Tooltip>
@@ -1849,7 +1851,7 @@ export default function DocumentManager() {
                                 </Tooltip>
                               )}
                             </TableCell>
-                            <TableCell className="max-w-xs min-w-45 truncate overflow-visible">
+                            <TableCell className="max-w-xs min-w-28 lg:min-w-45 truncate overflow-visible">
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   <div className="truncate">
@@ -1880,10 +1882,10 @@ export default function DocumentManager() {
                             </TableCell>
                             <TableCell className="whitespace-nowrap text-right tabular-nums">{doc.content_length ?? '-'}</TableCell>
                             <TableCell className="whitespace-nowrap text-right tabular-nums">{doc.chunks_count ?? '-'}</TableCell>
-                            <TableCell className="whitespace-nowrap tabular-nums">
+                            <TableCell className="tabular-nums lg:whitespace-nowrap">
                               {formatDateTime(doc.created_at)}
                             </TableCell>
-                            <TableCell className="whitespace-nowrap tabular-nums">
+                            <TableCell className="tabular-nums lg:whitespace-nowrap">
                               {formatDateTime(doc.updated_at)}
                             </TableCell>
                             <TableCell className="text-center">
@@ -1897,26 +1899,21 @@ export default function DocumentManager() {
                           </TableRow>
                         ))}
                       </TableBody>
-                        {/* Page-turn bar pinned to the table footer, centered. */}
-                        {pagination.total_pages > 1 && (
-                          <TableFooter>
-                            <TableRow>
-                              <TableCell colSpan={9} className="px-3 py-1.5">
-                                <PaginationControls
-                                  currentPage={pagination.page}
-                                  totalPages={pagination.total_pages}
-                                  pageSize={pagination.page_size}
-                                  totalCount={pagination.total_count}
-                                  onPageChange={handlePageChange}
-                                  onPageSizeChange={handlePageSizeChange}
-                                  isLoading={isRefreshing}
-                                />
-                              </TableCell>
-                            </TableRow>
-                          </TableFooter>
-                        )}
                     </Table>
                   </TooltipProvider>
+                    {/* Page-turn bar pinned to the card's bottom edge, outside the table's
+                        scroll region so the table above it gets the flexible height. */}
+                    <div className="flex-none border-t border-gray-200 bg-card px-3 py-1.5 dark:border-gray-700">
+                      <PaginationControls
+                        currentPage={pagination.page}
+                        totalPages={pagination.total_pages}
+                        pageSize={pagination.page_size}
+                        totalCount={pagination.total_count}
+                        onPageChange={handlePageChange}
+                        onPageSizeChange={handlePageSizeChange}
+                        isLoading={isRefreshing}
+                      />
+                    </div>
                 </div>
               </div>
             )}

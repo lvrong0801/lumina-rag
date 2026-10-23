@@ -293,11 +293,16 @@
       },
       "batch": {
         "uploading": "正在上传文件...",
+        "replacing": "正在替换旧文档（删除重建可能需要几分钟）…",
+        "uploadingFile": "正在上传 {{name}}（{{index}}/{{total}}）…",
+        "replacingFile": "正在替换旧文档并上传 {{name}}（{{index}}/{{total}}）…",
+        "pipelineBusy": "流水线正在处理其他任务，覆盖暂时被拒绝，请稍后重试",
         "success": "文件上传完成",
         "error": "部分文件上传失败"
       },
       "generalError": "上传失败\n{{error}}",
       "fileTypes": "支持的文件类型：{{types}}",
+      "supportedTypesSummary": "支持 {{types}} 等共 {{count}} 种格式（悬停查看完整列表）",
       "advancedSettings": {
         "title": "高级处理选项",
         "serverDefault": "使用服务器默认值",
