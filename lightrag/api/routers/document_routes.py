@@ -7906,6 +7906,9 @@ def create_document_routes(
             raise HTTPException(status_code=400, detail="Category name cannot be empty")
         if old_name not in cats:
             raise HTTPException(status_code=404, detail="Category not found")
+        if new_name == old_name:
+            # Idempotent: an unchanged rename is a no-op, not a conflict.
+            return {"old_name": old_name, "new_name": new_name}
         if new_name in cats:
             raise HTTPException(status_code=409, detail="Category already exists")
         cats[cats.index(old_name)] = new_name
