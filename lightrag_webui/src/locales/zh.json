@@ -107,6 +107,20 @@
     "deleteError": "删除工作区失败。",
     "nameEmpty": "工作区名称不能为空。",
     "nameInvalid": "名称仅限字母、数字、下划线或连字符。",
+    "colName": "名称",
+    "colDesc": "描述",
+    "colStatus": "状态",
+    "colOwner": "所有者",
+    "descPlaceholder": "描述（可选）",
+    "empty": "暂无工作区",
+    "statusActive": "启用",
+    "statusArchived": "已归档",
+    "editTitle": "编辑工作区“{{name}}”",
+    "editDesc": "可修改描述与状态；工作区名称创建后不可更改。",
+    "editTooltip": "编辑“{{name}}”",
+    "cannotEditDefault": "默认工作区不可编辑",
+    "updateSuccess": "工作区“{{name}}”已更新。",
+    "updateError": "更新工作区失败。",
     "moved": "已移动到“{{name}}”",
     "moveRemoved": "已移出分类",
     "moveError": "设置分类失败"
@@ -148,7 +162,12 @@
     "grantSuccess": "已授予“{{name}}”的 {{level}} 权限。",
     "grantError": "设置权限失败。",
     "revokeSuccess": "已撤销“{{name}}”的权限。",
-    "revokeError": "撤销权限失败。"
+    "revokeError": "撤销权限失败。",
+    "wsSelectPlaceholder": "选择命名空间",
+    "wsSelected": "已选 {{count}} 个命名空间",
+    "noWorkspaces": "暂无可授权的命名空间",
+    "wsSelectDesc": "勾选该用户可访问的命名空间；创建后只有这些命名空间对其可见。admin 角色无需勾选。",
+    "grantPartialError": "用户已创建，但以下命名空间授权失败：{{names}}"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -199,7 +218,8 @@
     "forbidden": "仅管理员可以访问系统管理页。",
     "tabs": {
       "preferences": "偏好设置",
-      "users": "用户管理"
+      "users": "用户管理",
+      "workspaces": "工作区"
     }
   },
   "documentPanel": {

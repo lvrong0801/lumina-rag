@@ -4,6 +4,7 @@
  * Sub-tabs:
  *   偏好设置  — language + theme (same settings as the sidebar popover)
  *   用户管理  — AdminUserPanel (/admin/users), incl. role assignment
+ *   工作区    — WorkspacePanel (/workspaces): create / edit / delete
  */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -11,6 +12,7 @@ import {
   SettingsIcon,
   UsersIcon,
   LockIcon,
+  FolderOpenIcon,
 } from 'lucide-react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -19,6 +21,7 @@ import {
 } from '@/components/ui/Select'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import AdminUserPanel from '@/components/admin/AdminUserPanel'
+import WorkspacePanel from '@/components/admin/WorkspacePanel'
 
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/state'
@@ -104,7 +107,7 @@ function PreferencesPanel() {
 export default function AdminPage() {
   const { t } = useTranslation()
   const { role } = useAuthStore()
-  const [subTab, setSubTab] = useState<'preferences' | 'users'>('preferences')
+  const [subTab, setSubTab] = useState<'preferences' | 'users' | 'workspaces'>('preferences')
 
   if (!canManageUsers(role)) {
     return (
@@ -133,8 +136,11 @@ export default function AdminPage() {
             <TabsTrigger value="users" className="gap-1.5">
               <UsersIcon className="size-4" />{t('adminPage.tabs.users')}
             </TabsTrigger>
+            <TabsTrigger value="workspaces" className="gap-1.5">
+              <FolderOpenIcon className="size-4" />{t('adminPage.tabs.workspaces')}
+            </TabsTrigger>
           </TabsList>
-          {subTab === 'preferences' ? <PreferencesPanel /> : <AdminUserPanel />}
+          {subTab === 'preferences' ? <PreferencesPanel /> : subTab === 'users' ? <AdminUserPanel /> : <WorkspacePanel />}
         </Tabs>
       </div>
     </div>

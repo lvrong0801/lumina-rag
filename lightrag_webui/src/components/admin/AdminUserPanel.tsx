@@ -11,7 +11,9 @@ import { useTranslation } from 'react-i18next'
 import { Loader2, Plus, Trash2, KeyRound, ShieldCheck } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
+import Checkbox from '@/components/ui/Checkbox'
 import Input from '@/components/ui/Input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/Popover'
 import {
   Table,
   TableBody,
@@ -44,8 +46,10 @@ import {
   listUserPermissions,
   setUserPermission,
   deleteUserPermission,
+  listWorkspaces,
   type AdminUser,
   type AdminWorkspacePermission,
+  type WorkspaceInfo,
 } from '@/api/lightrag'
 
 const ROLE_STYLES: Record<string, string> = {
@@ -67,6 +71,12 @@ export default function AdminUserPanel() {
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newRole, setNewRole] = useState('viewer')
+  // Namespaces the new user is granted at creation time (non-default only —
+  // the default workspace has an empty server name and can't sit in a path
+  // parameter).
+  const [grantableWs, setGrantableWs] = useState<WorkspaceInfo[]>([])
+  const [selectedWs, setSelectedWs] = useState<string[]>([])
+  const [newGrantLevel, setNewGrantLevel] = useState('write')
 
   // Permission sub-dialog
   const [permUser, setPermUser] = useState<AdminUser | null>(null)
@@ -94,6 +104,23 @@ export default function AdminUserPanel() {
     return () => clearTimeout(timer)
   }, [loadUsers])
 
+  useEffect(() => {
+    let cancelled = false
+    listWorkspaces()
+      .then((data) => {
+        if (cancelled) return
+        setGrantableWs((data ?? []).filter((w) => !w.is_default && w.name !== ''))
+      })
+      .catch((err) => console.error('[AdminUserPanel] load workspaces failed:', err))
+    return () => { cancelled = true }
+  }, [])
+
+  const toggleWs = (name: string) => {
+    setSelectedWs((prev) =>
+      prev.includes(name) ? prev.filter((w) => w !== name) : [...prev, name]
+    )
+  }
+
   const loadPermissions = useCallback(async (user: AdminUser) => {
     setPermLoading(true)
     try {
@@ -115,9 +142,26 @@ export default function AdminUserPanel() {
     try {
       setCreating(true)
       await createUser({ username, password: newPassword, role: newRole })
+      // Grants only matter for non-admin roles — admins bypass workspace
+      // checks, so granting them rows would be noise.
+      const failed: string[] = []
+      if (newRole !== 'admin') {
+        for (const ws of selectedWs) {
+          try {
+            await setUserPermission(username, ws, newGrantLevel)
+          } catch (err) {
+            console.error('[AdminUserPanel] seed grant failed:', ws, err)
+            failed.push(toLabel(ws))
+          }
+        }
+      }
       toast.success(t('admin.createSuccess', { username }))
+      if (failed.length > 0) {
+        toast.error(t('admin.grantPartialError', { names: failed.join(', ') }))
+      }
       setNewUsername('')
       setNewPassword('')
+      setSelectedWs([])
       await loadUsers()
     } catch (err) {
       console.error('[AdminUserPanel] create failed:', err)
@@ -223,10 +267,62 @@ export default function AdminUserPanel() {
                 </SelectContent>
               </Select>
             </div>
+            {newRole !== 'admin' && (
+              <>
+                <div className="min-w-[160px]">
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <Button variant="outline" className="h-9 w-full justify-start font-normal">
+                        {selectedWs.length > 0
+                          ? t('admin.wsSelected', { count: selectedWs.length })
+                          : t('admin.wsSelectPlaceholder')}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-56 p-2" align="start">
+                      {grantableWs.length === 0 ? (
+                        <p className="px-2 py-1 text-sm text-muted-foreground">
+                          {t('admin.noWorkspaces')}
+                        </p>
+                      ) : (
+                        <div className="max-h-48 space-y-1 overflow-auto">
+                          {grantableWs.map((ws) => (
+                            <label
+                              key={ws.name}
+                              className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm hover:bg-accent"
+                            >
+                              <Checkbox
+                                checked={selectedWs.includes(ws.name)}
+                                onCheckedChange={() => toggleWs(ws.name)}
+                              />
+                              {toLabel(ws.name)}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </PopoverContent>
+                  </Popover>
+                </div>
+                <div className="w-[100px]">
+                  <Select value={newGrantLevel} onValueChange={setNewGrantLevel}>
+                    <SelectTrigger className="h-9">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="read">read</SelectItem>
+                      <SelectItem value="write">write</SelectItem>
+                      <SelectItem value="admin">admin</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            )}
             <Button onClick={handleCreate} disabled={creating}>
               {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.create')}
             </Button>
           </div>
+          {newRole !== 'admin' && (
+            <p className="mt-2 text-xs text-muted-foreground">{t('admin.wsSelectDesc')}</p>
+          )}
         </div>
 
         {/* Users table */}

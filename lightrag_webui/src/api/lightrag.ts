@@ -1557,6 +1557,10 @@ export type WorkspaceInfo = {
   is_default: boolean
   /** present for non-admin callers when RBAC is enforced (read | write | admin) */
   access_level?: string
+  /** admin-only metadata fields (PostgreSQL workspace metadata when enabled) */
+  owner?: string | null
+  description?: string
+  status?: string // active | archived
 }
 
 export type WorkspaceResponse = {
@@ -1569,8 +1573,19 @@ export const listWorkspaces = async (): Promise<WorkspaceInfo[]> => {
   return response.data
 }
 
-export const createWorkspace = async (name: string): Promise<WorkspaceResponse> => {
-  const response = await axiosInstance.post('/workspaces', { name })
+export const createWorkspace = async (
+  name: string,
+  description = ''
+): Promise<WorkspaceResponse> => {
+  const response = await axiosInstance.post('/workspaces', { name, description })
+  return response.data
+}
+
+export const updateWorkspace = async (
+  name: string,
+  patch: { description?: string; status?: string }
+): Promise<WorkspaceResponse> => {
+  const response = await axiosInstance.patch(`/workspaces/${encodeURIComponent(name)}`, patch)
   return response.data
 }
 

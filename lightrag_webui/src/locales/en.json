@@ -107,6 +107,20 @@
     "deleteError": "Failed to delete workspace.",
     "nameEmpty": "Workspace name cannot be empty.",
     "nameInvalid": "Name may only contain letters, digits, underscores or hyphens.",
+    "colName": "Name",
+    "colDesc": "Description",
+    "colStatus": "Status",
+    "colOwner": "Owner",
+    "descPlaceholder": "Description (optional)",
+    "empty": "No workspaces",
+    "statusActive": "Active",
+    "statusArchived": "Archived",
+    "editTitle": "Edit workspace \"{{name}}\"",
+    "editDesc": "Edit the description and status; the workspace name cannot be changed.",
+    "editTooltip": "Edit \"{{name}}\"",
+    "cannotEditDefault": "Default workspace cannot be edited",
+    "updateSuccess": "Workspace \"{{name}}\" updated.",
+    "updateError": "Failed to update workspace.",
     "moved": "Moved to \"{{name}}\"",
     "moveRemoved": "Removed from category",
     "moveError": "Failed to set category"
@@ -148,7 +162,12 @@
     "grantSuccess": "Granted {{level}} on \"{{name}}\".",
     "grantError": "Failed to set permission.",
     "revokeSuccess": "Revoked permission on \"{{name}}\".",
-    "revokeError": "Failed to revoke permission."
+    "revokeError": "Failed to revoke permission.",
+    "wsSelectPlaceholder": "Select workspaces",
+    "wsSelected": "{{count}} workspaces selected",
+    "noWorkspaces": "No grantable workspaces",
+    "wsSelectDesc": "Pick the workspaces this user may access; only those will be visible after login. Not needed for the admin role.",
+    "grantPartialError": "User created, but granting these workspaces failed: {{names}}"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -199,7 +218,8 @@
     "forbidden": "Only admins can access the system administration page.",
     "tabs": {
       "preferences": "Preferences",
-      "users": "Users"
+      "users": "Users",
+      "workspaces": "Workspaces"
     }
   },
   "documentPanel": {
