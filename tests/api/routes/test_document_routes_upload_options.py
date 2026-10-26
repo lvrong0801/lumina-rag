@@ -39,10 +39,31 @@ class _FakeDocStatus:
     async def get_doc_by_file_basename(self, basename):
         return None
 
+    async def get_docs_paginated(self, **kwargs):
+        # Empty corpus: the version migration's backfill scan finds nothing.
+        return [], 0
+
+    async def update_doc_status_fields(self, doc_id, fields):
+        raise AssertionError("no docs exist to update")
+
+
+class _FakeFullDocs:
+    """Dict-backed stand-in for the ``full_docs`` KV namespace."""
+
+    def __init__(self):
+        self.store = {}
+
+    async def get_by_id(self, key):
+        return self.store.get(key)
+
+    async def upsert(self, payload):
+        self.store.update(payload)
+
 
 class _FakeRag:
     def __init__(self):
         self.doc_status = _FakeDocStatus()
+        self.full_docs = _FakeFullDocs()
         # {} resolves to the default chunker config (fixed_token 1200/100).
         self.addon_params = {}
         self.chunking_func = chunking_by_token_size
@@ -109,12 +130,14 @@ def _post_upload(client, data=None, filename="a.txt"):
 
 
 def test_upload_without_overrides_forwards_none(monkeypatch, tmp_path):
-    """Back-compat: no advanced fields -> no snapshot, no metadata extras."""
+    """Back-compat: no advanced fields -> no chunk snapshot; the only
+    metadata extra is the version tag (every doc belongs to a version —
+    omitted form value lands on the latest, here the migrated "1.0")."""
     client, captured = _make_client(monkeypatch, tmp_path)
     resp = _post_upload(client)
     assert resp.status_code == 200, resp.text
     assert captured["chunk_options"] is None
-    assert captured["doc_status_extra"] is None
+    assert captured["doc_status_extra"] == {"version": "1.0"}
 
 
 def test_upload_chunk_overrides_merged_into_active_strategy(
@@ -179,14 +202,20 @@ def test_upload_summary_language_lands_in_doc_status_extra(
     client, captured = _make_client(monkeypatch, tmp_path)
     resp = _post_upload(client, data={"summary_language": "English"})
     assert resp.status_code == 200, resp.text
-    assert captured["doc_status_extra"] == {"summary_language": "English"}
+    assert captured["doc_status_extra"] == {
+        "summary_language": "English",
+        "version": "1.0",
+    }
 
 
 def test_upload_summary_language_stripped(monkeypatch, tmp_path):
     client, captured = _make_client(monkeypatch, tmp_path)
     resp = _post_upload(client, data={"summary_language": "  Chinese  "})
     assert resp.status_code == 200, resp.text
-    assert captured["doc_status_extra"] == {"summary_language": "Chinese"}
+    assert captured["doc_status_extra"] == {
+        "summary_language": "Chinese",
+        "version": "1.0",
+    }
 
 
 def test_upload_overlong_summary_language_rejected(monkeypatch, tmp_path):
@@ -200,14 +229,20 @@ def test_upload_enable_multimodal_true_and_false(monkeypatch, tmp_path):
     client, captured = _make_client(monkeypatch, tmp_path)
     resp = _post_upload(client, data={"enable_multimodal": "true"})
     assert resp.status_code == 200, resp.text
-    assert captured["doc_status_extra"] == {"enable_multimodal": True}
+    assert captured["doc_status_extra"] == {
+        "enable_multimodal": True,
+        "version": "1.0",
+    }
 
     captured.clear()
     resp = _post_upload(
         client, data={"enable_multimodal": "false"}, filename="b.txt"
     )
     assert resp.status_code == 200, resp.text
-    assert captured["doc_status_extra"] == {"enable_multimodal": False}
+    assert captured["doc_status_extra"] == {
+        "enable_multimodal": False,
+        "version": "1.0",
+    }
 
 
 def test_upload_overrides_combine_with_mode_target_metadata(
@@ -286,6 +321,35 @@ def test_upload_overrides_combine_with_mode_target_metadata(
     assert extra["summary_language"] == "Chinese"
     fixed = captured["chunk_options"]["fixed_token"]
     assert fixed["chunk_token_size"] == 1500
+
+
+def test_upload_version_form_field(monkeypatch, tmp_path):
+    """The ``version`` form value must name an existing version (404/400
+    otherwise); omitted, the doc lands on the latest one."""
+    client, captured = _make_client(monkeypatch, tmp_path)
+
+    # Unknown version: 404; malformed name: 400.
+    resp = _post_upload(client, data={"version": "9.9"})
+    assert resp.status_code == 404, resp.text
+    resp = _post_upload(client, data={"version": "v2"}, filename="b.txt")
+    assert resp.status_code == 400, resp.text
+
+    # Omitted: the only version after migration is "1.0", so it is also the latest.
+    resp = _post_upload(client, filename="c.txt")
+    assert resp.status_code == 200, resp.text
+    assert captured["doc_status_extra"]["version"] == "1.0"
+
+    # Explicit value wins over the latest-version default.
+    resp = client.post(
+        "/documents/versions", headers=_HEADERS, json={"name": "2.0"}
+    )
+    assert resp.status_code == 200, resp.text
+    resp = _post_upload(client, data={"version": "1.0"}, filename="d.txt")
+    assert resp.status_code == 200, resp.text
+    assert captured["doc_status_extra"]["version"] == "1.0"
+    resp = _post_upload(client, filename="e.txt")
+    assert resp.status_code == 200, resp.text
+    assert captured["doc_status_extra"]["version"] == "2.0"
 
 
 class TestParseEngineOverride:

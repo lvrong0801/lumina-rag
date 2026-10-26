@@ -1309,6 +1309,10 @@ class DocumentsRequest(BaseModel):
         default=None,
         description="Filter by document category. Empty string for uncategorized, None for all.",
     )
+    version: Optional[str] = Field(
+        default=None,
+        description="Filter by document version (e.g. '1.0'). None for all versions.",
+    )
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
@@ -5517,6 +5521,7 @@ def create_document_routes(
         summary_language: str | None = Form(None),
         enable_multimodal: bool | None = Form(None),
         parse_engine: str | None = Form(None),
+        version: str | None = Form(None),
         http_request: Request = None,
         rag=Depends(get_rag_dependency),
         doc_manager=Depends(get_doc_manager_dependency),
@@ -5599,6 +5604,10 @@ def create_document_routes(
           or an engine that cannot read the file's suffix all return HTTP
           400. An explicit filename ``[engine]`` hint on the file outranks
           this form value — per-file intent beats batch-level intent.
+        - ``version`` (str): version tag for this document, stored as
+          ``metadata.version`` (e.g. ``1.0``). Must name an existing
+          version — unknown names return HTTP 404. Omit it and the doc
+          lands on the latest version.
         Omit a field to keep the server default.
 
         Args:
@@ -5614,10 +5623,11 @@ def create_document_routes(
         Raises:
             HTTPException: 400 unsupported file type, malformed filename
                 hint, or invalid ``chunk_size`` / ``chunk_overlap_size`` /
-                ``summary_language`` / ``parse_engine`` override, 409
-                same-name conflict or scan-classifying / destructive job in
-                flight, 413 file too large, 422 invalid chunking
-                configuration (an explicit ``C`` selector without a custom
+                ``summary_language`` / ``parse_engine`` / ``version``
+                override, 404 unknown ``version`` tag, 409 same-name
+                conflict or scan-classifying / destructive job in flight,
+                413 file too large, 422 invalid chunking configuration (an
+                explicit ``C`` selector without a custom
                 ``LightRAG.chunking_func``), 500 other errors.
         """
         rag = await _ensure_dep(rag, get_rag_dependency)
@@ -5741,6 +5751,34 @@ def create_document_routes(
             doc_status_extra = {
                 **(doc_status_extra or {}),
                 **doc_processing_overrides,
+            }
+
+        # Document version tag: an explicit form value must name an existing
+        # version; when omitted the doc lands on the latest one. Reading the
+        # version list may run the one-time legacy-category migration, so an
+        # upgrade's first upload is also a valid trigger.
+        version = (version or "").strip() or None
+        if version is not None and not _VERSION_NAME_RE.match(version):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid version tag '{version}'.",
+            )
+        upload_versions = await _get_version_list(rag)
+        if version is not None and _find_version(upload_versions, version) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Version '{version}' not found.",
+            )
+        if version is None and mode in ("overwrite", "incremental"):
+            # Content refresh, not a re-filing: keep the doc where it lived
+            # instead of jumping it to the latest version.
+            first_meta = (target_statuses[target_doc_ids[0]] or {}).get("metadata") or {}
+            version = first_meta.get("version") or None
+        target_version = version or _latest_version(upload_versions)
+        if target_version is not None:
+            doc_status_extra = {
+                **(doc_status_extra or {}),
+                "version": target_version,
             }
 
         from lightrag.kg.shared_storage import start_reserved_background_task
@@ -7683,6 +7721,7 @@ def create_document_routes(
                         sort_field=request.sort_field,
                         sort_direction=request.sort_direction,
                         category=request.category,
+                        doc_version=request.version,
                     ),
                 )
             )
@@ -7812,11 +7851,34 @@ def create_document_routes(
 
 
     # ------------------------------------------------------------------
-    # Document categories
+    # Document versions (version -> categories -> docs)
     # ------------------------------------------------------------------
+    # Version names are dot-joined integers ("1", "1.0", "2.1.3") so the
+    # ordering is unambiguous: "latest" = max by numeric tuple compare,
+    # never string compare ("10.0" > "2.0").
+
+    _VERSION_NAME_RE = re.compile(r"^\d{1,4}(\.\d{1,4}){0,3}$")
+
+    def _version_sort_key(name: str) -> tuple:
+        return tuple(int(p) for p in name.split("."))
+
+    def _find_version(versions: list[dict], name: str) -> dict | None:
+        return next((v for v in versions if v["name"] == name), None)
+
+    def _latest_version(versions: list[dict]) -> str | None:
+        if not versions:
+            return None
+        return max(versions, key=lambda v: _version_sort_key(v["name"]))["name"]
+
+    def _check_version_name(name: str) -> None:
+        if not _VERSION_NAME_RE.match(name):
+            raise HTTPException(
+                status_code=400,
+                detail="Version name must be numbers joined by dots, e.g. 1.0 or 2.1.3",
+            )
 
     async def _get_category_list(rag) -> list[str]:
-        """Read the workspace category list from KV storage."""
+        """Read the legacy flat category list (migration source only)."""
         try:
             raw = await rag.full_docs.get_by_id("_doc_categories")
             if raw and "categories" in raw:
@@ -7825,23 +7887,67 @@ def create_document_routes(
             pass
         return []
 
-    async def _save_category_list(rag, categories: list[str]) -> None:
+    async def _save_version_list(rag, versions: list[dict]) -> None:
         await rag.full_docs.upsert({
-            "_doc_categories": {"categories": categories}
+            "_doc_versions": {"versions": versions}
         })
 
-    @router.get(
-        "/categories",
-        dependencies=[Depends(combined_auth), Depends(authorize_read)],
-    )
-    async def list_categories(
-        rag=Depends(get_rag_dependency),
-    ):
-        """List all document categories with document counts."""
-        rag = await _ensure_dep(rag, get_rag_dependency)
-        cats = await _get_category_list(rag)
-        # Count docs per category using paginated fetch with large page
-        result = {}
+    async def _get_version_list(rag) -> list[dict]:
+        """Read the version store, migrating the legacy flat list on first read.
+
+        The store shape is ``{"versions": [{"name": str, "categories": [str]}]}``.
+        A stored-but-empty list is a real state (every version deleted), not a
+        migration trigger — migration runs only when the key is absent.
+        """
+        try:
+            raw = await rag.full_docs.get_by_id("_doc_versions")
+            if raw is not None and "versions" in raw:
+                versions = [
+                    {"name": v["name"], "categories": list(v.get("categories", []))}
+                    for v in raw["versions"]
+                ]
+                versions.sort(key=lambda v: _version_sort_key(v["name"]))
+                return versions
+        except Exception:
+            pass
+        return await _migrate_legacy_categories_to_versions(rag)
+
+    async def _migrate_legacy_categories_to_versions(rag) -> list[dict]:
+        """Create version "1.0" from the legacy category list and backfill docs.
+
+        Every doc without ``metadata.version`` gets "1.0"; categories only
+        found on docs (drift vs the legacy list) are appended so nothing
+        becomes invisible. Idempotent: re-running writes the same values.
+        """
+        versions = [
+            {"name": "1.0", "categories": [c for c in await _get_category_list(rag) if c]}
+        ]
+        cat_list = versions[0]["categories"]
+        page = 1
+        while True:
+            docs, count = await rag.doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="created_at", sort_direction="asc"
+            )
+            for doc_id, doc in docs:
+                meta = dict(doc.metadata or {})
+                changed = False
+                if not meta.get("version"):
+                    meta["version"] = "1.0"
+                    changed = True
+                cat = meta.get("category") or ""
+                if cat and cat not in cat_list:
+                    cat_list.append(cat)
+                if changed:
+                    await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+            if page * 200 >= count:
+                break
+            page += 1
+        await _save_version_list(rag, versions)
+        return versions
+
+    async def _scan_doc_version_category_counts(rag) -> tuple[dict, int]:
+        """One pass over all docs → (counts keyed by (version, category), total)."""
+        counts: dict[tuple[str, str], int] = {}
         total = 0
         page = 1
         while True:
@@ -7849,22 +7955,192 @@ def create_document_routes(
                 page=page, page_size=200, sort_field="created_at", sort_direction="asc"
             )
             for _, doc in docs:
-                cat = (doc.metadata or {}).get("category", "") or ""
-                result[cat] = result.get(cat, 0) + 1
+                meta = doc.metadata or {}
+                key = (meta.get("version") or "1.0", meta.get("category") or "")
+                counts[key] = counts.get(key, 0) + 1
             total = count
             if page * 200 >= count:
                 break
             page += 1
+        return counts, total
+
+    @router.get(
+        "/versions",
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
+    )
+    async def list_versions(
+        rag=Depends(get_rag_dependency),
+    ):
+        """List document versions (semver-sorted) with per-version and per-category counts."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        versions = await _get_version_list(rag)
+        counts, total = await _scan_doc_version_category_counts(rag)
         return {
-            "categories": [
-                {"name": c, "count": result.get(c, 0)} for c in cats
+            "versions": [
+                {
+                    "name": v["name"],
+                    "count": sum(n for (ver, _c), n in counts.items() if ver == v["name"]),
+                    "uncategorized_count": counts.get((v["name"], ""), 0),
+                    "categories": [
+                        {"name": c, "count": counts.get((v["name"], c), 0)}
+                        for c in v["categories"]
+                    ],
+                }
+                for v in versions
             ],
-            "uncategorized_count": result.get("", 0),
+            "latest_version": _latest_version(versions),
+            "uncategorized_count": sum(n for (_v, c), n in counts.items() if c == ""),
             "total_count": total,
+        }
+
+    class VersionCreateRequest(BaseModel):
+        name: str = Field(..., min_length=1, max_length=20)
+
+    @router.post(
+        "/versions",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def create_version(
+        body: VersionCreateRequest,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Create a document version. New versions start with no categories."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        name = body.name.strip()
+        _check_version_name(name)
+        versions = await _get_version_list(rag)
+        if _find_version(versions, name) is not None:
+            raise HTTPException(status_code=409, detail="Version already exists")
+        versions.append({"name": name, "categories": []})
+        await _save_version_list(rag, versions)
+        return {"name": name}
+
+    class VersionRenameRequest(BaseModel):
+        new_name: str = Field(..., min_length=1, max_length=20)
+
+    @router.put(
+        "/versions/{old_name}",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def rename_version(
+        old_name: str,
+        body: VersionRenameRequest,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Rename a version; all docs carrying it move to the new name."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        new_name = body.new_name.strip()
+        _check_version_name(new_name)
+        versions = await _get_version_list(rag)
+        entry = _find_version(versions, old_name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+        if new_name == old_name:
+            return {"old_name": old_name, "new_name": new_name}
+        if _find_version(versions, new_name) is not None:
+            raise HTTPException(status_code=409, detail="Version already exists")
+        entry["name"] = new_name
+        await _save_version_list(rag, versions)
+        # Python-side match (not the storage filter): correct on every impl,
+        # including ones whose paginated metadata filters are intentionally lax.
+        page = 1
+        while True:
+            docs, count = await rag.doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="created_at", sort_direction="asc"
+            )
+            for doc_id, doc in docs:
+                meta = dict(doc.metadata or {})
+                if meta.get("version") == old_name:
+                    meta["version"] = new_name
+                    await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+            if page * 200 >= count:
+                break
+            page += 1
+        return {"old_name": old_name, "new_name": new_name}
+
+    @router.delete(
+        "/versions/{name}",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def delete_version(
+        name: str,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Delete a version. Refused (409) while any document still carries it."""
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        versions = await _get_version_list(rag)
+        entry = _find_version(versions, name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="Version not found")
+        page = 1
+        while True:
+            docs, count = await rag.doc_status.get_docs_paginated(
+                page=page, page_size=200, sort_field="created_at", sort_direction="asc"
+            )
+            for _doc_id, doc in docs:
+                if (doc.metadata or {}).get("version") == name:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Version '{name}' still has documents; move or delete them first",
+                    )
+            if page * 200 >= count:
+                break
+            page += 1
+        versions = [v for v in versions if v["name"] != name]
+        await _save_version_list(rag, versions)
+        return {"deleted": name}
+
+    # ------------------------------------------------------------------
+    # Document categories (scoped to a version; default scope = latest)
+    # ------------------------------------------------------------------
+
+    def _resolve_version_scope(versions: list[dict], version: str | None) -> dict:
+        """Resolve the version entry a category operation applies to.
+
+        ``None`` means "the latest version", which keeps pre-versioning
+        clients (they never send one) operating on their own data after the
+        migration has put all of it under the only version that exists then.
+        """
+        target = version.strip() if version else None
+        if target is None:
+            target = _latest_version(versions)
+        if target is None:
+            raise HTTPException(status_code=404, detail="No versions exist yet")
+        entry = _find_version(versions, target)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"Version not found: {target}")
+        return entry
+
+    @router.get(
+        "/categories",
+        dependencies=[Depends(combined_auth), Depends(authorize_read)],
+    )
+    async def list_categories(
+        version: str | None = None,
+        rag=Depends(get_rag_dependency),
+    ):
+        """List categories of one version (default: latest) with doc counts.
+
+        Counts (including uncategorized/total) are scoped to that version.
+        """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        versions = await _get_version_list(rag)
+        entry = _resolve_version_scope(versions, version)
+        counts, _total = await _scan_doc_version_category_counts(rag)
+        scoped = [
+            (c, counts.get((entry["name"], c), 0)) for c in entry["categories"]
+        ]
+        return {
+            "categories": [{"name": c, "count": n} for c, n in scoped],
+            "uncategorized_count": counts.get((entry["name"], ""), 0),
+            "total_count": sum(
+                n for (ver, _c), n in counts.items() if ver == entry["name"]
+            ),
         }
 
     class CategoryCreateRequest(BaseModel):
         name: str = Field(..., min_length=1, max_length=50)
+        version: str | None = Field(default=None, max_length=20)
 
     @router.post(
         "/categories",
@@ -7874,17 +8150,18 @@ def create_document_routes(
         body: CategoryCreateRequest,
         rag=Depends(get_rag_dependency),
     ):
-        """Create a new document category."""
+        """Create a category inside a version (default: latest)."""
         rag = await _ensure_dep(rag, get_rag_dependency)
-        cats = await _get_category_list(rag)
         name = body.name.strip()
         if not name:
             raise HTTPException(status_code=400, detail="Category name cannot be empty")
-        if name in cats:
+        versions = await _get_version_list(rag)
+        entry = _resolve_version_scope(versions, body.version)
+        if name in entry["categories"]:
             raise HTTPException(status_code=409, detail="Category already exists")
-        cats.append(name)
-        await _save_category_list(rag, cats)
-        return {"name": name}
+        entry["categories"].append(name)
+        await _save_version_list(rag, versions)
+        return {"name": name, "version": entry["name"]}
 
     class CategoryRenameRequest(BaseModel):
         new_name: str = Field(..., min_length=1, max_length=50)
@@ -7896,11 +8173,14 @@ def create_document_routes(
     async def rename_category(
         old_name: str,
         body: CategoryRenameRequest,
+        version: str | None = None,
         rag=Depends(get_rag_dependency),
     ):
-        """Rename a category; all docs in it move to the new name."""
+        """Rename a category within a version; docs in it follow the new name."""
         rag = await _ensure_dep(rag, get_rag_dependency)
-        cats = await _get_category_list(rag)
+        versions = await _get_version_list(rag)
+        entry = _resolve_version_scope(versions, version)
+        cats = entry["categories"]
         new_name = body.new_name.strip()
         if not new_name:
             raise HTTPException(status_code=400, detail="Category name cannot be empty")
@@ -7912,8 +8192,9 @@ def create_document_routes(
         if new_name in cats:
             raise HTTPException(status_code=409, detail="Category already exists")
         cats[cats.index(old_name)] = new_name
-        await _save_category_list(rag, cats)
-        # Rename in all docs
+        await _save_version_list(rag, versions)
+        # Rename in all docs of this version (Python-side match: the storage
+        # metadata filter is lax on some impls and must not widen the rewrite)
         page = 1
         while True:
             docs, count = await rag.doc_status.get_docs_paginated(
@@ -7921,8 +8202,9 @@ def create_document_routes(
             )
             for doc_id, doc in docs:
                 meta = dict(doc.metadata or {})
-                meta["category"] = new_name
-                await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+                if meta.get("category") == old_name and meta.get("version") == entry["name"]:
+                    meta["category"] = new_name
+                    await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
             if page * 200 >= count:
                 break
             page += 1
@@ -7934,16 +8216,18 @@ def create_document_routes(
     )
     async def delete_category(
         name: str,
+        version: str | None = None,
         rag=Depends(get_rag_dependency),
     ):
-        """Delete a category; docs in it become uncategorized."""
+        """Delete a category within a version; docs in it become uncategorized."""
         rag = await _ensure_dep(rag, get_rag_dependency)
-        cats = await _get_category_list(rag)
-        if name not in cats:
+        versions = await _get_version_list(rag)
+        entry = _resolve_version_scope(versions, version)
+        if name not in entry["categories"]:
             raise HTTPException(status_code=404, detail="Category not found")
-        cats.remove(name)
-        await _save_category_list(rag, cats)
-        # Clear category from docs in it
+        entry["categories"].remove(name)
+        await _save_version_list(rag, versions)
+        # Clear category from docs in it (same version only)
         page = 1
         while True:
             docs, count = await rag.doc_status.get_docs_paginated(
@@ -7951,8 +8235,9 @@ def create_document_routes(
             )
             for doc_id, doc in docs:
                 meta = dict(doc.metadata or {})
-                meta.pop("category", None)
-                await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+                if meta.get("category") == name and meta.get("version") == entry["name"]:
+                    meta.pop("category", None)
+                    await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
             if page * 200 >= count:
                 break
             page += 1
@@ -7960,6 +8245,7 @@ def create_document_routes(
 
     class DocCategoryAssignRequest(BaseModel):
         category: str = Field(..., max_length=50)
+        version: str | None = Field(default=None, max_length=20)
 
     @router.put(
         "/{doc_id}/category",
@@ -7970,22 +8256,67 @@ def create_document_routes(
         body: DocCategoryAssignRequest,
         rag=Depends(get_rag_dependency),
     ):
-        """Assign a category to a document. Empty string clears it."""
+        """Assign a category to a document. Empty string clears it.
+
+        With ``version`` set, the document also moves to that version (the
+        category must exist there). Without it, the category must exist in
+        the document's current version.
+        """
         rag = await _ensure_dep(rag, get_rag_dependency)
         doc = await rag.doc_status.get_by_id(doc_id)
         if doc is None:
             raise HTTPException(status_code=404, detail="Document not found")
-        cats = await _get_category_list(rag)
-        cat = body.category.strip()
-        if cat and cat not in cats:
-            raise HTTPException(status_code=400, detail=f"Unknown category: {cat}")
         meta = dict(doc.get("metadata") or {})
+        versions = await _get_version_list(rag)
+        target_version = body.version or meta.get("version") or _latest_version(versions)
+        entry = _resolve_version_scope(versions, target_version)
+        cat = body.category.strip()
+        if cat and cat not in entry["categories"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown category in version {entry['name']}: {cat}",
+            )
+        meta["version"] = entry["name"]
         if cat:
             meta["category"] = cat
         else:
             meta.pop("category", None)
         await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
-        return {"doc_id": doc_id, "category": cat}
+        return {"doc_id": doc_id, "category": cat, "version": entry["name"]}
+
+    class DocVersionAssignRequest(BaseModel):
+        version: str = Field(..., min_length=1, max_length=20)
+
+    @router.put(
+        "/{doc_id}/version",
+        dependencies=[Depends(combined_auth), Depends(authorize_write)],
+    )
+    async def assign_document_version(
+        doc_id: str,
+        body: DocVersionAssignRequest,
+        rag=Depends(get_rag_dependency),
+    ):
+        """Move a document to another version.
+
+        Its category is kept only when the same name exists in the target
+        version; otherwise the document lands uncategorized there.
+        """
+        rag = await _ensure_dep(rag, get_rag_dependency)
+        doc = await rag.doc_status.get_by_id(doc_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        versions = await _get_version_list(rag)
+        entry = _resolve_version_scope(versions, body.version)
+        meta = dict(doc.get("metadata") or {})
+        if meta.get("category") and meta["category"] not in entry["categories"]:
+            meta.pop("category", None)
+        meta["version"] = entry["name"]
+        await rag.doc_status.update_doc_status_fields(doc_id, {"metadata": meta})
+        return {
+            "doc_id": doc_id,
+            "version": entry["name"],
+            "category": meta.get("category") or "",
+        }
 
     @router.get(
         "/supported_file_types",

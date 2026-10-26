@@ -14,10 +14,13 @@ export default function DocCategoryCell({ doc, onChange }: { doc: DocStatusRespo
   const { t } = useTranslation()
   const [cats, setCats] = useState<string[]>([])
   const current = doc.metadata?.category || ''
+  const docVersion = doc.metadata?.version || undefined
 
   useEffect(() => {
-    listCategories().then(d => setCats(d.categories.map(c => c.name))).catch(() => {})
-  }, [])
+    // Categories are version-scoped: offer only the ones in THIS document's
+    // version (undefined → the backend resolves the doc's version).
+    listCategories(docVersion).then(d => setCats(d.categories.map(c => c.name))).catch(() => {})
+  }, [docVersion])
 
   const handleChange = async (value: string) => {
     try {

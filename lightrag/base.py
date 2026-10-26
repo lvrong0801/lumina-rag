@@ -1648,6 +1648,7 @@ class DocStatusStorage(BaseKVStorage, ABC):
         sort_direction: str = "desc",
         include_deleted: bool = False,
         category: str | None = None,
+        doc_version: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
         """Get documents with pagination support
 

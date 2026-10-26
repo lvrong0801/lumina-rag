@@ -71,7 +71,24 @@
     "renameError": "Failed to rename",
     "deleted": "Category deleted",
     "deleteError": "Failed to delete",
-    "confirmDelete": "Delete category \"{{name}}\"? Documents in it become uncategorized."
+    "confirmDelete": "Delete category \"{{name}}\"? Documents in it become uncategorized.",
+    "newVersion": "New version",
+    "createVersionTitle": "Create version",
+    "versionNamePlaceholder": "Version number, e.g. 1.0",
+    "versionCreated": "Version \"{{name}}\" created",
+    "versionCreateError": "Failed to create version",
+    "renameVersion": "Rename version",
+    "renameVersionTitle": "Rename version",
+    "versionRenamed": "Version renamed",
+    "versionRenameError": "Failed to rename",
+    "deleteVersion": "Delete version",
+    "versionDeleted": "Version deleted",
+    "versionDeleteError": "Failed to delete",
+    "confirmDeleteVersion": "Delete version \"{{name}}\"? Categories under it will be removed.",
+    "collapseVersion": "Collapse version",
+    "expandVersion": "Expand version",
+    "newCategory": "New category",
+    "createCategoryIn": "New category in {{version}}"
   },
   "workspaces": {
     "new": "New workspace",
@@ -284,6 +301,11 @@
         "loading": "Loading documents...",
         "empty": "No processed documents available",
         "required": "Please select a target document first"
+      },
+      "version": {
+        "label": "Version",
+        "placeholder": "Select version",
+        "inherit": "Same as target document"
       },
       "single": {
         "uploading": "Uploading {{name}}: {{percent}}%",

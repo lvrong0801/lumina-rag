@@ -7804,16 +7804,21 @@ def render_chunks_context_text(chunks_with_reference_ids: list[dict]) -> str:
     ``chunks_with_reference_ids`` must already carry ``reference_id`` — the
     second return value of :func:`generate_reference_list_from_chunks`. This
     is the single place that projects a chunk down to
-    ``{reference_id, content, content_headings?}`` and serializes it, one JSON
-    object per line, so that any token-budget check done against this exact
-    call sequence matches what callers go on to send downstream verbatim.
+    ``{reference_id, doc_version?, content, content_headings?}`` and serializes
+    it, one JSON object per line, so that any token-budget check done against
+    this exact call sequence matches what callers go on to send downstream
+    verbatim. ``doc_version`` is emitted only when the chunk was annotated
+    with its document's version tag, so unversioned corpora render
+    byte-identically to before.
     """
     chunks_context = []
     for chunk in chunks_with_reference_ids:
         entry = {
             "reference_id": chunk["reference_id"],
-            "content": chunk["content"],
         }
+        if chunk.get("doc_version"):
+            entry["doc_version"] = chunk["doc_version"]
+        entry["content"] = chunk["content"]
         if chunk.get("content_headings"):
             entry["content_headings"] = chunk["content_headings"]
         chunks_context.append(entry)

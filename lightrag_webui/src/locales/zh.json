@@ -71,7 +71,24 @@
     "renameError": "重命名失败",
     "deleted": "分类已删除",
     "deleteError": "删除失败",
-    "confirmDelete": "确定删除分类“{{name}}”？其中的文档将变为未分类。"
+    "confirmDelete": "确定删除分类“{{name}}”？其中的文档将变为未分类。",
+    "newVersion": "新建版本",
+    "createVersionTitle": "新建版本",
+    "versionNamePlaceholder": "版本号，如 1.0",
+    "versionCreated": "已创建版本“{{name}}”",
+    "versionCreateError": "创建版本失败",
+    "renameVersion": "重命名版本",
+    "renameVersionTitle": "重命名版本",
+    "versionRenamed": "版本已重命名",
+    "versionRenameError": "重命名失败",
+    "deleteVersion": "删除版本",
+    "versionDeleted": "版本已删除",
+    "versionDeleteError": "删除失败",
+    "confirmDeleteVersion": "确定删除版本“{{name}}”？其中的分类将被一并移除。",
+    "collapseVersion": "折叠版本",
+    "expandVersion": "展开版本",
+    "newCategory": "新建分类",
+    "createCategoryIn": "在“{{version}}”中新建分类"
   },
   "workspaces": {
     "new": "新建工作区",
@@ -284,6 +301,11 @@
         "loading": "正在加载文档...",
         "empty": "暂无已处理的文档",
         "required": "请先选择目标文档"
+      },
+      "version": {
+        "label": "归属版本",
+        "placeholder": "选择版本",
+        "inherit": "跟随目标文档版本"
       },
       "single": {
         "uploading": "正在上传 {{name}}：{{percent}}%",

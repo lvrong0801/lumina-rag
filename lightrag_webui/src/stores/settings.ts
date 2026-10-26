@@ -32,6 +32,10 @@ interface SettingsState {
   categorySidebarCollapsed: boolean
   setCategorySidebarCollapsed: (collapsed: boolean) => void
 
+  // Documents page: which version nodes are expanded in the sidebar tree
+  categorySidebarExpandedVersions: string[]
+  toggleCategorySidebarVersion: (version: string) => void
+
   // Workspace settings
   currentWorkspace: string
   setCurrentWorkspace: (workspace: string) => void
@@ -143,6 +147,9 @@ const useSettingsStoreBase = create<SettingsState>()(
       showFileName: false,
       documentsPageSize: 10,
       categorySidebarCollapsed: false,
+      // Pre-expanded: after the versioning migration every existing corpus is
+      // "1.0", so its categories stay visible without a first click.
+      categorySidebarExpandedVersions: ['1.0'],
       sidebarCollapsed: false,
       currentWorkspace: '',
 
@@ -199,6 +206,12 @@ const useSettingsStoreBase = create<SettingsState>()(
       setDocumentsPageSize: (size: number) => set({ documentsPageSize: size }),
       setCurrentWorkspace: (workspace: string) => set({ currentWorkspace: workspace }),
       setCategorySidebarCollapsed: (collapsed: boolean) => set({ categorySidebarCollapsed: collapsed }),
+      toggleCategorySidebarVersion: (version: string) =>
+        set((state) => ({
+          categorySidebarExpandedVersions: state.categorySidebarExpandedVersions.includes(version)
+            ? state.categorySidebarExpandedVersions.filter((v) => v !== version)
+            : [...state.categorySidebarExpandedVersions, version]
+        })),
       setSidebarCollapsed: (collapsed: boolean) => set({ sidebarCollapsed: collapsed }),
 
       // User prompt history methods

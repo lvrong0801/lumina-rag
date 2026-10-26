@@ -74,6 +74,14 @@ beforeEach(() => {
     if (method === 'get' && url === '/health') {
       return ok({ status: 'healthy', configuration: {} }, config)
     }
+    // The dialog's version selector maps `.versions` as soon as it lands; the
+    // `{}` fallthrough below would crash the tree the moment the dialog opens.
+    if (method === 'get' && url === '/documents/versions') {
+      return ok(
+        { versions: [], latest_version: null, uncategorized_count: 0, total_count: 0 },
+        config
+      )
+    }
     return ok({}, config)
   })
 })

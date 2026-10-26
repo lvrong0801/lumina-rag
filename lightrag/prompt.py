@@ -439,6 +439,17 @@ Consider the conversation history if provided to maintain conversational flow an
 {content_data}
 """
 
+# Appended to the rendered rag_response / naive_rag_response system prompt only
+# when the retrieved context spans 2+ distinct document versions. A template
+# placeholder would force every custom prompt override to carry it; appending
+# keeps custom templates working untouched.
+PROMPTS[
+    "version_conflict_hint"
+] = """---Document Versions---
+
+Some Document Chunks above carry a `doc_version` tag (e.g. "1.0") naming the document version they come from. When chunks from different versions contradict each other, treat the chunk with the HIGHER version number as authoritative on the conflicting point (e.g. 2.0 over 1.0) and regard the lower version as outdated there. Chunks from lower versions that do NOT conflict with higher-version content remain valid knowledge — use them freely.
+"""
+
 PROMPTS["kg_query_context"] = """
 Knowledge Graph Data (Entity):
 

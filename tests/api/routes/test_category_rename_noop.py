@@ -5,6 +5,11 @@ previously it fell into the ``new_name in cats`` check and returned 409
 "Category already exists", which surfaced in the WebUI as "cannot rename"
 (every IME-composition Enter submits the still-unchanged text). A genuine
 rename keeps moving the docs' ``metadata.category`` to the new name.
+
+Since the version feature, categories live under a version: these tests seed
+only the legacy ``_doc_categories`` store, so every request first exercises the
+lazy migration into ``_doc_versions`` (docs backfilled to version "1.0"), then
+asserts the rename behavior inside that version scope.
 """
 
 import importlib
@@ -43,17 +48,21 @@ class _FakeDocStatus:
     def __init__(self):
         self.paginated_calls = []
         self.updated = []
+        self.doc_metadata = {"category": "产品需求文档"}
+        self.deleted = False
 
     async def get_docs_paginated(self, **kwargs):
         self.paginated_calls.append(kwargs)
-        doc = type(
-            "Doc",
-            (),
-            {"metadata": {"category": kwargs["category"]}},
-        )()
+        if self.deleted:
+            return [], 0
+        doc = type("Doc", (), {"metadata": self.doc_metadata})()
+        category = kwargs.get("category")
+        if category is not None and category != self.doc_metadata.get("category", ""):
+            return [], 0
         return [("doc-1", doc)], 1
 
     async def update_doc_status_fields(self, doc_id, fields):
+        self.doc_metadata.update(fields.get("metadata") or {})
         self.updated.append((doc_id, fields))
 
 
@@ -79,10 +88,12 @@ def test_rename_to_same_name_is_noop(tmp_path):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"old_name": "产品需求文档", "new_name": "产品需求文档"}
-    # No list mutation and no doc-status scan: a true no-op.
-    assert rag.full_docs.store["_doc_categories"]["categories"] == ["产品需求文档"]
-    assert rag.doc_status.paginated_calls == []
-    assert rag.doc_status.updated == []
+    versions = rag.full_docs.store["_doc_versions"]["versions"]
+    assert versions == [{"name": "1.0", "categories": ["产品需求文档"]}]
+    # The category list itself is untouched; only the migration backfill ran.
+    assert rag.doc_status.updated == [
+        ("doc-1", {"metadata": {"category": "产品需求文档", "version": "1.0"}})
+    ]
 
 
 def test_rename_to_new_name_moves_docs(tmp_path):
@@ -93,6 +104,11 @@ def test_rename_to_new_name_moves_docs(tmp_path):
         json={"new_name": "PRD文档"},
     )
     assert resp.status_code == 200, resp.text
-    assert rag.full_docs.store["_doc_categories"]["categories"] == ["PRD文档"]
-    assert rag.doc_status.paginated_calls[0]["category"] == "产品需求文档"
-    assert rag.doc_status.updated == [("doc-1", {"metadata": {"category": "PRD文档"}})]
+    versions = rag.full_docs.store["_doc_versions"]["versions"]
+    assert versions == [{"name": "1.0", "categories": ["PRD文档"]}]
+    rename_scans = [c for c in rag.doc_status.paginated_calls if c.get("category")]
+    assert rename_scans and rename_scans[0]["category"] == "产品需求文档"
+    assert rag.doc_status.doc_metadata == {
+        "category": "PRD文档",
+        "version": "1.0",
+    }

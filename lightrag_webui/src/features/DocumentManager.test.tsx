@@ -159,6 +159,17 @@ const backendAdapter = async (config: any) => {
     return respond(config, { categories: [], uncategorized_count: 0, total_count: 0 })
   }
 
+  // Same trap as /documents/categories above: the sidebar now fetches the
+  // version tree on mount and maps `.versions` unconditionally.
+  if (url.endsWith('/documents/versions')) {
+    return respond(config, {
+      versions: [],
+      latest_version: null,
+      uncategorized_count: 0,
+      total_count: 0
+    })
+  }
+
   if (url.endsWith('/documents/delete_document')) {
     backend.deleteCalls += 1
     const docIds: string[] = JSON.parse(config.data ?? '{}').doc_ids ?? []

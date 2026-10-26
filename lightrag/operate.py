@@ -4820,6 +4820,12 @@ async def kg_query(
         user_prompt=effective_user_prompt.slot,
         context_data=context_result.context,
     )
+    # Version-conflict rule: only when the retrieved chunks actually span
+    # multiple document versions — single-version contexts gain nothing.
+    if len(
+        (context_result.raw_data.get("metadata") or {}).get("doc_versions") or []
+    ) >= 2:
+        sys_prompt += "\n\n" + PROMPTS["version_conflict_hint"]
 
     user_query = query
 
@@ -5309,6 +5315,61 @@ async def _filter_chunks_for_access(
             continue
         kept.append(chunk)
     return kept
+
+
+async def _annotate_chunks_with_doc_version(
+    chunks: list[dict],
+    doc_status: DocStatusStorage | None = None,
+) -> set[str]:
+    """Stamp every chunk with its source document's version tag.
+
+    Chunks carry no document metadata of their own, so the version label
+    (``doc_version`` on the chunk dict, projected into the LLM context by
+    ``render_chunks_context_text``) is resolved here from
+    ``doc_status.metadata.version`` — the same basename-keyed, per-query
+    cached lookup ``_filter_chunks_for_access`` uses, and likewise
+    fail-open: an unreadable store leaves chunks unannotated rather than
+    erroring the query. Documents indexed before the version feature (or
+    with no tag yet) simply get no label.
+
+    Returns the set of distinct versions seen across the annotated chunks.
+    The caller appends the conflict-resolution prompt rule only when this
+    set has 2+ entries — a single-version answer gains nothing from it.
+    """
+    versions: set[str] = set()
+    if not chunks or doc_status is None:
+        return versions
+
+    cache: dict[str, str | None] = {}
+    for chunk in chunks:
+        file_path = chunk.get("file_path", "")
+        if not file_path or file_path == "unknown_source":
+            continue
+        basename = os.path.basename(file_path.replace("\\", "/"))
+        if not basename:
+            continue
+        if basename not in cache:
+            version: str | None = None
+            try:
+                resolved = await doc_status.get_doc_by_file_basename(basename)
+                doc_data = (
+                    resolved[1] if isinstance(resolved, tuple) else resolved
+                )
+                if doc_data:
+                    version = (doc_data.get("metadata") or {}).get(
+                        "version"
+                    ) or None
+            except Exception as e:  # fail-open
+                logger.warning(
+                    f"doc-version annotation: doc_status lookup failed for "
+                    f"'{basename}': {e}"
+                )
+            cache[basename] = version
+        version = cache[basename]
+        if version:
+            chunk["doc_version"] = version
+            versions.add(version)
+    return versions
 
 
 async def _filter_entities_relations_for_access(
@@ -6324,6 +6385,12 @@ async def _build_query_context(
         entities_context = truncation_result["entities_context"]
         relations_context = truncation_result["relations_context"]
 
+    # Version labels ride the chunks into the LLM context; the distinct set
+    # decides whether kg_query appends the conflict-resolution rule.
+    doc_versions = await _annotate_chunks_with_doc_version(
+        merged_chunks, doc_status
+    )
+
     # Stage 4: Build final LLM context with dynamic token processing
     # _build_context_str now always returns tuple[str, dict]
     context, raw_data = await _build_context_str(
@@ -6353,6 +6420,9 @@ async def _build_query_context(
         "high_level": hl_keywords_list,
         "low_level": ll_keywords_list,
     }
+    # Distinct document versions present in the retrieved chunks; kg_query
+    # appends the version-conflict rule to the system prompt at len >= 2.
+    raw_data["metadata"]["doc_versions"] = sorted(doc_versions)
     raw_data["metadata"]["processing_info"] = {
         "total_entities_found": len(search_result.get("final_entities", [])),
         "total_relations_found": len(search_result.get("final_relations", [])),
@@ -7169,6 +7239,12 @@ async def naive_query(
         processed_chunks
     )
 
+    # Stamp each chunk with its source document's version tag; the distinct
+    # set decides whether the version-conflict rule joins the system prompt.
+    doc_versions = await _annotate_chunks_with_doc_version(
+        processed_chunks_with_ref_ids, doc_status
+    )
+
     logger.info(f"Final context: {len(processed_chunks_with_ref_ids)} chunks")
 
     # Build raw data structure for naive mode using processed chunks with reference IDs
@@ -7191,6 +7267,7 @@ async def naive_query(
         "total_chunks_found": len(chunks),
         "final_chunks_count": len(processed_chunks_with_ref_ids),
     }
+    raw_data["metadata"]["doc_versions"] = sorted(doc_versions)
 
     # Build chunks_context from processed chunks with reference IDs
     text_units_str = render_chunks_context_text(processed_chunks_with_ref_ids)
@@ -7216,6 +7293,8 @@ async def naive_query(
         user_prompt=effective_user_prompt.slot,
         content_data=context_content,
     )
+    if len(doc_versions) >= 2:
+        sys_prompt += "\n\n" + PROMPTS["version_conflict_hint"]
 
     user_query = query
 

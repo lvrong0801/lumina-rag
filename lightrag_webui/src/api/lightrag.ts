@@ -347,6 +347,7 @@ export type DocumentsRequest = {
   sort_field: 'created_at' | 'updated_at' | 'id' | 'file_path'
   sort_direction: 'asc' | 'desc'
   category?: string | null
+  version?: string | null
 }
 
 export type CategoryInfo = {
@@ -356,6 +357,20 @@ export type CategoryInfo = {
 
 export type CategoriesResponse = {
   categories: CategoryInfo[]
+  uncategorized_count: number
+  total_count: number
+}
+
+export type DocVersionInfo = {
+  name: string
+  count: number
+  uncategorized_count: number
+  categories: CategoryInfo[]
+}
+
+export type VersionsResponse = {
+  versions: DocVersionInfo[]
+  latest_version: string | null
   uncategorized_count: number
   total_count: number
 }
@@ -1063,6 +1078,8 @@ export type UploadDocumentOptions = {
   enableMultimodal?: boolean
   /** Pin the parser engine for this document only (filename hint wins). */
   parseEngine?: string
+  /** Version tag for this document (defaults to the latest version server-side). */
+  version?: string
 }
 
 export const uploadDocument = async (
@@ -1083,6 +1100,7 @@ export const uploadDocument = async (
   if (options?.summaryLanguage !== undefined) formData.append('summary_language', options.summaryLanguage)
   if (options?.enableMultimodal !== undefined) formData.append('enable_multimodal', String(options.enableMultimodal))
   if (options?.parseEngine !== undefined) formData.append('parse_engine', options.parseEngine)
+  if (options?.version !== undefined) formData.append('version', options.version)
 
   const response = await axiosInstance.post('/documents/upload', formData, {
     headers: {
@@ -1669,26 +1687,64 @@ export const queryAuditLogs = async (params: {
 }
 
 
-// --- Document categories ---
+// --- Document versions ---
 
-export async function listCategories(): Promise<CategoriesResponse> {
-  const response = await axiosInstance.get('/documents/categories')
+export async function listVersions(): Promise<VersionsResponse> {
+  const response = await axiosInstance.get('/documents/versions')
   return response.data
 }
 
-export async function createCategory(name: string): Promise<{ name: string }> {
-  const response = await axiosInstance.post('/documents/categories', { name })
+export async function createVersion(name: string): Promise<{ name: string }> {
+  const response = await axiosInstance.post('/documents/versions', { name })
   return response.data
 }
 
-export async function renameCategory(oldName: string, newName: string): Promise<void> {
-  await axiosInstance.put(`/documents/categories/${encodeURIComponent(oldName)}`, { new_name: newName })
+export async function renameVersion(oldName: string, newName: string): Promise<void> {
+  await axiosInstance.put(`/documents/versions/${encodeURIComponent(oldName)}`, { new_name: newName })
 }
 
-export async function deleteCategory(name: string): Promise<void> {
-  await axiosInstance.delete(`/documents/categories/${encodeURIComponent(name)}`)
+export async function deleteVersion(name: string): Promise<void> {
+  await axiosInstance.delete(`/documents/versions/${encodeURIComponent(name)}`)
 }
 
-export async function assignDocumentCategory(docId: string, category: string): Promise<void> {
-  await axiosInstance.put(`/documents/${encodeURIComponent(docId)}/category`, { category })
+// --- Document categories (scoped to a version; default scope = latest) ---
+
+export async function listCategories(version?: string): Promise<CategoriesResponse> {
+  const response = await axiosInstance.get('/documents/categories', {
+    params: version ? { version } : {}
+  })
+  return response.data
+}
+
+export async function createCategory(name: string, version?: string): Promise<{ name: string }> {
+  const response = await axiosInstance.post(
+    '/documents/categories',
+    version ? { name, version } : { name }
+  )
+  return response.data
+}
+
+export async function renameCategory(oldName: string, newName: string, version?: string): Promise<void> {
+  await axiosInstance.put(
+    `/documents/categories/${encodeURIComponent(oldName)}`,
+    { new_name: newName },
+    { params: version ? { version } : {} }
+  )
+}
+
+export async function deleteCategory(name: string, version?: string): Promise<void> {
+  await axiosInstance.delete(`/documents/categories/${encodeURIComponent(name)}`, {
+    params: version ? { version } : {}
+  })
+}
+
+export async function assignDocumentCategory(docId: string, category: string, version?: string): Promise<void> {
+  await axiosInstance.put(
+    `/documents/${encodeURIComponent(docId)}/category`,
+    version ? { category, version } : { category }
+  )
+}
+
+export async function assignDocumentVersion(docId: string, version: string): Promise<void> {
+  await axiosInstance.put(`/documents/${encodeURIComponent(docId)}/version`, { version })
 }

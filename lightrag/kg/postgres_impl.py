@@ -6865,6 +6865,7 @@ class PGDocStatusStorage(DocStatusStorage):
         sort_direction: str = "desc",
         include_deleted: bool = False,
         category: str | None = None,
+        doc_version: str | None = None,
     ) -> tuple[list[tuple[str, DocProcessingStatus]], int]:
         """Get documents with pagination support
 
@@ -6945,6 +6946,16 @@ class PGDocStatusStorage(DocStatusStorage):
                 param_count += 1
                 where_clause += f" AND metadata->>'category' = ${param_count}"
                 params["category_filter"] = category
+
+        # Version filter: metadata->>'version' (same metadata JSON side-channel
+        # as category; empty string matches "unset" for symmetry with it)
+        if doc_version is not None:
+            if doc_version == "":
+                where_clause += " AND (metadata->>'version' IS NULL OR metadata->>'version' = '')"
+            else:
+                param_count += 1
+                where_clause += f" AND metadata->>'version' = ${param_count}"
+                params["version_filter"] = doc_version
 
         # Build ORDER BY clause using validated whitelist values.
         # NULLS LAST is applied in both the inner paged CTE and the outer query so

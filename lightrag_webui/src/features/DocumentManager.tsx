@@ -71,7 +71,7 @@ import {
   type DeletionProbeHandle
 } from '@/features/documentDeletionProbe'
 import usePageRestoreGeneration from '@/hooks/usePageRestoreGeneration'
-import CategorySidebar from '@/components/documents/CategorySidebar'
+import CategorySidebar, { type CategorySelection } from '@/components/documents/CategorySidebar'
 import DocCategoryCell from '@/components/documents/DocCategoryCell'
 
 type StatusDisplayConfig = {
@@ -439,7 +439,9 @@ export default function DocumentManager() {
 
   // New pagination state
   const [currentPageDocs, setCurrentPageDocs] = useState<DocStatusResponse[]>([])
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
+  // Sidebar tree selection: null version = all versions; null category = whole
+  // version; "" category = uncategorized within that version.
+  const [selection, setSelection] = useState<CategorySelection>({ version: null, category: null })
   // Bumped whenever document↔category membership or document existence may
   // have changed (move, delete, restore, clear, upload) — the sidebar only
   // re-pulls its counts on this trigger.
@@ -708,8 +710,9 @@ export default function DocumentManager() {
     page_size: query.pageSize,
     sort_field: query.sortField,
     sort_direction: query.sortDirection,
-    category: selectedCategory
-  }), [selectedCategory])
+    category: selection.category,
+    version: selection.version
+  }), [selection])
 
   // Utility function to update component state.
   //
@@ -1528,8 +1531,8 @@ export default function DocumentManager() {
   return (
     <div className="flex h-full min-h-0 gap-2 p-2 lg:gap-3 lg:p-3">
       <CategorySidebar
-        selectedCategory={selectedCategory}
-        onSelect={(cat) => { setSelectedCategory(cat); setPagination(prev => ({ ...prev, page: 1 })); fetchDocuments(); }}
+        selection={selection}
+        onSelect={(sel) => { setSelection(sel); setPagination(prev => ({ ...prev, page: 1 })); fetchDocuments(); }}
         refreshTrigger={categoryRefreshTrigger}
       />
       <Card className="!overflow-hidden flex flex-col h-full min-h-0 flex-1">

@@ -34,7 +34,9 @@ import {
   getDocumentsPaginated,
   uploadDocument,
   checkHealth,
+  listVersions,
   type DocStatusResponse,
+  type DocVersionInfo,
   type LightragParserEngine,
   type LightragStatus,
   type UploadDocumentOptions,
@@ -70,6 +72,11 @@ interface UploadDocumentsDialogProps {
 
 const UPLOAD_MODES: UploadMode[] = ['new', 'overwrite', 'incremental']
 
+// Radix Select forbids empty-string values, so "leave the document's version
+// untouched" rides on a sentinel that is simply omitted from the form — the
+// backend then applies its inherit-then-latest resolution.
+const VERSION_INHERIT = '__inherit__'
+
 export default function UploadDocumentsDialog({
   onDocumentsUploaded,
   onUploadBatchAccepted
@@ -85,6 +92,14 @@ export default function UploadDocumentsDialog({
   const [targetDocs, setTargetDocs] = useState<DocStatusResponse[]>([])
   const [targetDocsLoading, setTargetDocsLoading] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
+
+  // Version filing for this batch. New uploads file straight into a version
+  // (default: the latest); overwrite/incremental default to VERSION_INHERIT
+  // so a content refresh never silently re-files the document.
+  const [versions, setVersions] = useState<DocVersionInfo[]>([])
+  const [latestVersion, setLatestVersion] = useState<string | null>(null)
+  const [docVersion, setDocVersion] = useState<string>('')
+  const [versionsLoading, setVersionsLoading] = useState(false)
 
   // Server-side defaults surfaced as placeholders / labels in the advanced
   // settings panel; fetched once per dialog open from /health.
@@ -187,6 +202,37 @@ export default function UploadDocumentsDialog({
     }
   }, [open])
 
+  // Version list for the version selector, fetched once per open. The default
+  // filing target is the latest version for new uploads; replace modes stay
+  // on "inherit" so the user opts into re-filing explicitly.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    listVersions()
+      .then((res) => {
+        if (cancelled) return
+        setVersions(res.versions)
+        setLatestVersion(res.latest_version)
+        // Only fill a not-yet-chosen target; a fast mode switch may have set
+        // one before this fetch resolved and must not be stomped.
+        setDocVersion((prev) => prev !== '' ? prev : (mode === 'new' ? (res.latest_version ?? '') : VERSION_INHERIT))
+      })
+      .catch((err) => {
+        if (cancelled) return
+        console.warn('Failed to fetch document versions for upload dialog:', err)
+        setDocVersion('')
+      })
+      .finally(() => {
+        if (!cancelled) setVersionsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  // Default selection is resolved on open; later mode switches re-default
+  // through handleModeChange, so `mode` must not re-run this fetch.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
   const resetAdvancedOptions = useCallback(() => {
     setChunkSize(undefined)
     setChunkOverlap(undefined)
@@ -198,7 +244,8 @@ export default function UploadDocumentsDialog({
   const handleModeChange = useCallback((next: UploadMode) => {
     setMode(next)
     setTargetDocIds([])
-  }, [])
+    setDocVersion(next === 'new' ? (latestVersion ?? '') : VERSION_INHERIT)
+  }, [latestVersion])
 
   const toggleTarget = useCallback((id: string, checked: boolean) => {
     setTargetDocIds((prev) =>
@@ -274,6 +321,7 @@ export default function UploadDocumentsDialog({
         if (enableMultimodal !== 'default') uploadOptions.enableMultimodal = enableMultimodal === 'true'
         if (summaryLanguage !== 'default') uploadOptions.summaryLanguage = summaryLanguage
         if (parseEngine !== 'default') uploadOptions.parseEngine = parseEngine
+        if (docVersion && docVersion !== VERSION_INHERIT) uploadOptions.version = docVersion
 
         // Create a collator that supports Chinese sorting
         const collator = new Intl.Collator(['zh-CN', 'en'], {
@@ -428,7 +476,7 @@ export default function UploadDocumentsDialog({
         setIsUploading(false)
       }
     },
-    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted, mode, targetDocIds, chunkSize, chunkOverlap, enableMultimodal, summaryLanguage, parseEngine, resetAdvancedOptions]
+    [setIsUploading, setProgresses, setFileErrors, t, onDocumentsUploaded, onUploadBatchAccepted, mode, targetDocIds, chunkSize, chunkOverlap, enableMultimodal, summaryLanguage, parseEngine, docVersion, resetAdvancedOptions]
   )
 
   const uploaderInputs = deriveUploaderInputs(fileTypes)
@@ -446,6 +494,9 @@ export default function UploadDocumentsDialog({
           // the uploader disabled — no window where a hinted file could start
           // uploading before the capability matrix arrives.
           setFileTypes({ status: 'loading' })
+          // Same idea for the version selector: resolved in the effect below,
+          // but `disabled` must be true from the very first open render.
+          setVersionsLoading(true)
         } else {
           setProgresses({})
           setFileErrors({})
@@ -453,6 +504,12 @@ export default function UploadDocumentsDialog({
           resetAdvancedOptions()
           setShowAdvanced(false)
           setServerDefaults(null)
+          // Drop the stale filing target so a reopened dialog can never send a
+          // version that was deleted since the last open — the fetch re-runs
+          // and re-defaults.
+          setVersions([])
+          setDocVersion('')
+          setVersionsLoading(false)
         }
         setOpen(nextOpen)
       }}
@@ -503,6 +560,30 @@ export default function UploadDocumentsDialog({
           {mode === 'incremental' && (
             <p className="text-muted-foreground text-xs">{t('documentPanel.uploadDocuments.mode.incrementalHint')}</p>
           )}
+        </div>
+
+        {/* Version filing target */}
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium">{t('documentPanel.uploadDocuments.version.label')}</span>
+          <Select
+            value={docVersion}
+            onValueChange={setDocVersion}
+            disabled={versionsLoading}
+          >
+            <SelectTrigger className="h-8 w-48 text-sm">
+              <SelectValue placeholder={t('documentPanel.uploadDocuments.version.placeholder')} />
+            </SelectTrigger>
+            <SelectContent>
+              {mode !== 'new' && (
+                <SelectItem value={VERSION_INHERIT}>
+                  {t('documentPanel.uploadDocuments.version.inherit')}
+                </SelectItem>
+              )}
+              {versions.map((v) => (
+                <SelectItem key={v.name} value={v.name}>{v.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         {/* Target document picker (overwrite / incremental) */}
