@@ -231,7 +231,7 @@ pymupdf4llm = [
     # Optional in-process PDF -> markdown parser engine
     # (lightrag/parser/pymupdf4llm); the engine's registry gate checks this
     # package's availability instead of an env-configured endpoint.
-    "pymupdf4llm>=1.0.0,<2.0.0",
+    "pymupdf4llm>=1.0.0,<3.0.0",
 ]
 
 test = [
