@@ -60,6 +60,11 @@ beforeEach(() => {
       }
       return ok({ status: 'success', message: 'granted' }, config)
     }
+    if (method === 'patch' && url.startsWith('/admin/users/')) {
+      const body = parseBody(config.data)
+      calls.push({ method, url, data: body })
+      return ok({ status: 'success', message: 'updated' }, config)
+    }
     return ok({}, config)
   })
 })
@@ -173,5 +178,36 @@ describe('AdminUserPanel create-time workspace grants', () => {
     // The user itself was still created and listed.
     expect(users.some((u) => u.username === 'neo')).toBe(true)
     expect(screen.getByText('neo')).toBeTruthy()
+  })
+
+  test('change password PATCHes the user and closes the dialog', async () => {
+    users.push({ username: 'zed', role: 'viewer', enabled: true })
+    const user = setup()
+    renderPanel()
+
+    // Icon-only action: tooltip lives in a Radix portal, so no accessible
+    // name — the row order is perm / password / enable / delete.
+    const row = (await screen.findByText('zed')).closest('tr')
+    expect(row).not.toBeNull()
+    await user.click(row!.querySelectorAll('button')[1])
+    const pwInput = await screen.findByPlaceholderText('New password')
+
+    // Empty password is rejected client-side, no request goes out.
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(calls.filter((c) => c.method === 'patch').length).toBe(0)
+
+    await user.type(pwInput, 'new-secret-9')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => {
+      expect(calls.length).toBe(1)
+    })
+    expect(calls[0]).toEqual({
+      method: 'patch',
+      url: '/admin/users/zed',
+      data: { password: 'new-secret-9' }
+    })
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText('New password')).toBeNull()
+    })
   })
 })

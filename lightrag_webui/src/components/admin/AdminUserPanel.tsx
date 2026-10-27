@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
-import { Loader2, Plus, Trash2, KeyRound, ShieldCheck } from 'lucide-react'
+import { Loader2, Plus, Trash2, KeyRound, ShieldCheck, LockKeyhole } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import Checkbox from '@/components/ui/Checkbox'
@@ -27,6 +27,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/Dialog'
@@ -85,6 +86,11 @@ export default function AdminUserPanel() {
   const [newPermWs, setNewPermWs] = useState('')
   const [newPermLevel, setNewPermLevel] = useState('read')
   const [permBusy, setPermBusy] = useState(false)
+
+  // Change-password sub-dialog
+  const [pwUser, setPwUser] = useState<AdminUser | null>(null)
+  const [pwValue, setPwValue] = useState('')
+  const [pwBusy, setPwBusy] = useState(false)
 
   const loadUsers = useCallback(async () => {
     try {
@@ -179,6 +185,30 @@ export default function AdminUserPanel() {
     } catch (err) {
       console.error('[AdminUserPanel] update failed:', err)
       toast.error(t('admin.updateError'))
+    }
+  }
+
+  const openChangePassword = (user: AdminUser) => {
+    setPwUser(user)
+    setPwValue('')
+  }
+
+  const handleChangePassword = async () => {
+    if (!pwUser) return
+    if (!pwValue) {
+      toast.error(t('admin.required'))
+      return
+    }
+    try {
+      setPwBusy(true)
+      await updateUser(pwUser.username, { password: pwValue })
+      toast.success(t('admin.passwordSuccess', { username: pwUser.username }))
+      setPwUser(null)
+    } catch (err) {
+      console.error('[AdminUserPanel] change password failed:', err)
+      toast.error(t('admin.passwordError'))
+    } finally {
+      setPwBusy(false)
     }
   }
 
@@ -374,6 +404,13 @@ export default function AdminUserPanel() {
                         </Button>
                         <Button
                           variant="outline" size="sm"
+                          onClick={() => openChangePassword(user)}
+                          tooltip={t('admin.changePassword')}
+                        >
+                          <LockKeyhole className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          variant="outline" size="sm"
                           onClick={() => handleUpdate(user, { enabled: !user.enabled })}
                           tooltip={user.enabled ? t('admin.disable') : t('admin.enable')}
                         >
@@ -483,6 +520,33 @@ export default function AdminUserPanel() {
               </Table>
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Change-password sub-dialog */}
+      <Dialog open={pwUser !== null} onOpenChange={(o) => { if (!o) setPwUser(null) }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>
+              {t('admin.changePasswordTitle', { username: pwUser?.username ?? '' })}
+            </DialogTitle>
+          </DialogHeader>
+          <Input
+            type="password"
+            placeholder={t('admin.newPasswordPlaceholder')}
+            value={pwValue}
+            autoFocus
+            onChange={(e) => setPwValue(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleChangePassword() }}
+          />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPwUser(null)} disabled={pwBusy}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={handleChangePassword} disabled={pwBusy}>
+              {pwBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.save')}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </>
