@@ -3259,6 +3259,21 @@ class ClientManager:
             return cls._instances["db"]
 
     @classmethod
+    async def get_initialized_client(cls) -> PostgreSQLDB | None:
+        """Return the already-initialized shared client, or None when no caller
+        has initialized the pool yet.
+
+        Bolt-on consumers (RBAC, audit, workspace metadata) do not know the
+        vector-storage signature the pool was configured with, and get_client
+        refuses a signature that differs from the first caller's. They must use
+        this accessor instead of guessing the signature. Borrowing does NOT
+        take a reference: the caller gets no lifecycle ownership, must not
+        release the client, and sees failures once the owners release the pool.
+        """
+        async with cls._lock:
+            return cls._instances["db"]
+
+    @classmethod
     async def release_client(cls, db: PostgreSQLDB):
         async with cls._lock:
             if db is not None:

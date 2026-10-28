@@ -12,7 +12,6 @@ manager is process-wide and shares the PostgreSQL client exactly like
 :class:`lightrag.api.rbac.RBACManager`.
 """
 import asyncio
-import os
 import time
 from typing import Any, Dict, List, Optional
 
@@ -94,10 +93,12 @@ class WorkspaceMetaManager:
         """Insert a workspace metadata row. Returns True when inserted, False
         when a row already existed (idempotent)."""
         try:
+            # query() binds tuple(params) — passing a dict would bind its KEYS
+            # (unlike execute(), which binds data.values()).
             rows = await self._db.query(
                 "INSERT INTO LIGHTRAG_WORKSPACES (name, owner, description) "
                 "VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING RETURNING name",
-                {"name": name, "owner": owner or None, "description": description or ""},
+                [name, owner or None, description or ""],
                 multirows=True,
             )
             inserted = bool(rows)
@@ -114,30 +115,34 @@ class WorkspaceMetaManager:
         description: Optional[str] = None,
         status: Optional[str] = None,
     ) -> bool:
-        """Update description and/or status. Returns True when a row changed."""
-        sets: List[str] = []
-        values: List[Any] = []
+        """Update description and/or status via upsert. Returns True on success.
+
+        Workspaces whose directory predates the metadata table (or whose row
+        was never written) have no row to UPDATE; a plain UPDATE would match
+        zero rows and silently change nothing while reporting success."""
+        if status is not None and status not in VALID_STATUSES:
+            raise ValueError(
+                f"Invalid workspace status '{status}'. Expected active/archived."
+            )
+        provided: List[tuple[str, Any]] = []
         if description is not None:
-            sets.append(f"description = ${len(values) + 1}")
-            values.append(description)
+            provided.append(("description", description))
         if status is not None:
-            if status not in VALID_STATUSES:
-                raise ValueError(
-                    f"Invalid workspace status '{status}'. Expected active/archived."
-                )
-            sets.append(f"status = ${len(values) + 1}")
-            values.append(status)
-        if not sets:
+            provided.append(("status", status))
+        if not provided:
             return False
-        values.append(name)
+        # $1 binds name; provided fields bind $2..$n in order.
+        columns = ", ".join(["name"] + [col for col, _ in provided])
+        marks = ", ".join(["$1"] + [f"${i}" for i in range(2, len(provided) + 2)])
+        sets = ", ".join(f"{col} = ${i}" for i, (col, _) in enumerate(provided, 2))
         sql = (
-            "UPDATE LIGHTRAG_WORKSPACES SET "
-            + ", ".join(sets)
-            + f", updated_at = now() WHERE name = ${len(values)}"
+            f"INSERT INTO LIGHTRAG_WORKSPACES ({columns}) VALUES ({marks}) "
+            f"ON CONFLICT (name) DO UPDATE SET {sets}, updated_at = now()"
         )
         try:
             # execute() binds tuple(data.values()) positionally, so use $1..$n
             # placeholders (asyncpg has no named-parameter support).
+            values = [name] + [value for _, value in provided]
             await self._db.execute(sql, {f"p{i}": v for i, v in enumerate(values, 1)})
             self._status_cache.pop(name, None)
             return True
@@ -162,7 +167,16 @@ _meta_lock = asyncio.Lock()
 
 async def get_workspace_meta_manager() -> Optional[WorkspaceMetaManager]:
     """Return the process-wide workspace metadata manager, or None when
-    PostgreSQL is unavailable (callers then degrade to no metadata)."""
+    PostgreSQL is unavailable (callers then degrade to no metadata).
+
+    The manager borrows the shared client pool already initialized by the PG
+    storages (or RBAC/audit at startup) instead of calling get_client itself:
+    the pool refuses any caller whose vector-storage signature differs from the
+    first initializer's, and this module has no way to know that signature —
+    the env var that names the vector storage is not the variable the LightRAG
+    instance was actually constructed with. When no pool exists yet the call
+    returns None and is retried on the next request (only success is cached).
+    """
     global _meta_manager
     async with _meta_lock:
         if _meta_manager is not None:
@@ -170,14 +184,14 @@ async def get_workspace_meta_manager() -> Optional[WorkspaceMetaManager]:
         try:
             from lightrag.kg.postgres_impl import ClientManager
 
-            # Pass the same vector_storage the main stack was initialized with:
-            # the PG client pool is process-wide and refuses a later call whose
-            # vector signature differs from the first caller's.
-            db = await ClientManager.get_client(
-                vector_storage=os.environ.get("LIGHTRAG_VECTOR_STORAGE")
-            )
-        except Exception as exc:  # pragma: no cover - PG unavailable
+            db = await ClientManager.get_initialized_client()
+        except Exception as exc:  # pragma: no cover - import/setup failure
             logger.warning(f"WorkspaceMeta: PostgreSQL unavailable, metadata disabled: {exc}")
+            return None
+        if db is None:
+            logger.info(
+                "WorkspaceMeta: PostgreSQL pool not initialized, metadata disabled"
+            )
             return None
         _meta_manager = WorkspaceMetaManager(db)
         return _meta_manager
