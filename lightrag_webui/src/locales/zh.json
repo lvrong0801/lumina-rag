@@ -123,7 +123,16 @@
     "updateError": "更新工作区失败。",
     "moved": "已移动到“{{name}}”",
     "moveRemoved": "已移出分类",
-    "moveError": "设置分类失败"
+    "moveError": "设置分类失败",
+    "title": "工作区",
+    "description": "按工作区隔离文档与知识图谱。",
+    "searchPlaceholder": "搜索工作区…",
+    "noMatch": "没有匹配的工作区。",
+    "createDialogDesc": "工作区为团队或项目隔离文档、文本块与知识图谱。",
+    "nameLabel": "名称",
+    "descLabel": "描述",
+    "statusLabel": "状态",
+    "archivedDesc": "归档后工作区为只读：可正常检索，但禁止写入。"
   },
   "admin": {
     "title": "用户管理",
@@ -172,7 +181,31 @@
     "wsSelected": "已选 {{count}} 个命名空间",
     "noWorkspaces": "暂无可授权的命名空间",
     "wsSelectDesc": "勾选该用户可访问的命名空间；创建后只有这些命名空间对其可见。admin 角色无需勾选。",
-    "grantPartialError": "用户已创建，但以下命名空间授权失败：{{names}}"
+    "grantPartialError": "用户已创建，但以下命名空间授权失败：{{names}}",
+    "searchPlaceholder": "搜索用户…",
+    "createDesc": "创建账号，并可在创建时一并授予工作区访问权限。",
+    "usernameLabel": "用户名",
+    "usernameRule": "1–64 个字符：字母、数字、下划线、点或连字符。",
+    "passwordLabel": "密码",
+    "showPassword": "显示密码",
+    "hidePassword": "隐藏密码",
+    "roleLabel": "角色",
+    "roleDesc": {
+      "admin": "完全访问，不受工作区限制",
+      "manager": "可管理文档并检索",
+      "viewer": "仅可检索"
+    },
+    "grantsLabel": "初始工作区授权",
+    "grantLevelLabel": "访问级别",
+    "editUser": "编辑用户",
+    "editTitle": "编辑用户“{{username}}”",
+    "editDesc": "调整角色或账号状态；重置密码请使用修改密码操作。",
+    "enableLabel": "启用账号",
+    "deleteTitle": "删除用户",
+    "deleteDesc": "用户“{{username}}”及其全部工作区授权将被永久删除，该操作不可撤销。",
+    "permAdminBypass": "管理员不受工作区检查限制，所有工作区均可访问，无需授权。",
+    "colCreatedAt": "创建时间",
+    "noMatch": "没有匹配的用户。"
   },
   "dashboard": {
     "title": "仪表盘",

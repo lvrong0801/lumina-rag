@@ -3,18 +3,20 @@
  *
  * Same /workspaces backend as the document page's WorkspaceSelector, but the
  * create/edit/delete affordances live here (admin-only via the page gate);
- * the selector on the document page is switch-only.
+ * the selector on the document page is switch-only. All flows run through
+ * dialogs (create / edit / delete confirm).
  *
  * "Edit" covers what PATCH /workspaces/{name} supports: description and the
  * active/archived status — renaming a workspace does not exist server-side.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
-import { Loader2, Plus, Pencil, Trash2 } from 'lucide-react'
+import { Loader2, Plus, Pencil, Trash2, Search } from 'lucide-react'
 
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import Textarea from '@/components/ui/Textarea'
 import {
   Table,
   TableBody,
@@ -61,8 +63,10 @@ export default function WorkspacePanel() {
 
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([])
   const [loading, setLoading] = useState(false)
+  const [query, setQuery] = useState('')
 
-  // Inline create form
+  // Create dialog
+  const [createOpen, setCreateOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
@@ -96,6 +100,21 @@ export default function WorkspacePanel() {
     return () => clearTimeout(timer)
   }, [load])
 
+  const filteredWorkspaces = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return workspaces
+    return workspaces.filter((ws) =>
+      toLabel(ws.name).toLowerCase().includes(q)
+      || (ws.description ?? '').toLowerCase().includes(q)
+    )
+  }, [workspaces, query])
+
+  const openCreate = () => {
+    setNewName('')
+    setNewDesc('')
+    setCreateOpen(true)
+  }
+
   const handleCreate = async () => {
     const name = newName.trim()
     if (!name) {
@@ -110,6 +129,7 @@ export default function WorkspacePanel() {
       setCreating(true)
       await createWorkspace(name, newDesc.trim())
       toast.success(t('workspaces.createSuccess', { name }))
+      setCreateOpen(false)
       setNewName('')
       setNewDesc('')
       await load()
@@ -168,32 +188,26 @@ export default function WorkspacePanel() {
 
   return (
     <div className="space-y-4">
-      {/* Create workspace */}
-      <div className="rounded-md border p-3">
-        <div className="mb-2 flex items-center gap-2 text-sm font-medium">
-          <Plus className="h-4 w-4" /> {t('workspaces.new')}
+      {/* Header: title + search + primary action */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold">{t('workspaces.title')}</h2>
+          <p className="mt-0.5 text-sm text-muted-foreground">{t('workspaces.description')}</p>
         </div>
-        <div className="flex flex-wrap items-end gap-2">
-          <div className="min-w-[160px] flex-1">
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
             <Input
-              placeholder={t('workspaces.namePlaceholder')}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
+              className="w-52 pl-8"
+              placeholder={t('workspaces.searchPlaceholder')}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
             />
           </div>
-          <div className="min-w-[200px] flex-[2]">
-            <Input
-              placeholder={t('workspaces.descPlaceholder')}
-              value={newDesc}
-              onChange={(e) => setNewDesc(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
-            />
-          </div>
-          <Button onClick={handleCreate} disabled={creating}>
-            {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.create')}
+          <Button onClick={openCreate}>
+            <Plus className="h-4 w-4" /> {t('workspaces.new')}
           </Button>
         </div>
-        <p className="mt-2 text-xs text-muted-foreground">{t('workspaces.createDesc')}</p>
       </div>
 
       {/* Workspaces table */}
@@ -215,14 +229,14 @@ export default function WorkspacePanel() {
                   <Loader2 className="mx-auto h-5 w-5 animate-spin" />
                 </TableCell>
               </TableRow>
-            ) : workspaces.length === 0 ? (
+            ) : filteredWorkspaces.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={5} className="py-6 text-center text-sm text-gray-500">
-                  {t('workspaces.empty')}
+                  {query ? t('workspaces.noMatch') : t('workspaces.empty')}
                 </TableCell>
               </TableRow>
             ) : (
-              workspaces.map((ws) => (
+              filteredWorkspaces.map((ws) => (
                 <TableRow key={ws.name === '' ? '__default__' : ws.name}>
                   <TableCell className="font-medium">
                     {toLabel(ws.name)}
@@ -272,29 +286,86 @@ export default function WorkspacePanel() {
         </Table>
       </div>
 
+      {/* Create dialog */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('workspaces.createTitle')}</DialogTitle>
+            <DialogDescription>{t('workspaces.createDialogDesc')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid gap-1.5">
+              <label className="text-sm font-medium" htmlFor="new-ws-name">
+                {t('workspaces.nameLabel')}
+              </label>
+              <Input
+                id="new-ws-name"
+                placeholder={t('workspaces.namePlaceholder')}
+                value={newName}
+                autoFocus
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleCreate() }}
+              />
+              <p className="text-xs text-muted-foreground">{t('workspaces.createDesc')}</p>
+            </div>
+            <div className="grid gap-1.5">
+              <label className="text-sm font-medium" htmlFor="new-ws-desc">
+                {t('workspaces.descLabel')}
+              </label>
+              <Textarea
+                id="new-ws-desc"
+                placeholder={t('workspaces.descPlaceholder')}
+                value={newDesc}
+                rows={3}
+                onChange={(e) => setNewDesc(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCreateOpen(false)} disabled={creating}>
+              {t('common.cancel')}
+            </Button>
+            <Button onClick={handleCreate} disabled={creating}>
+              {creating ? <Loader2 className="h-4 w-4 animate-spin" /> : t('common.create')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Edit dialog */}
       <Dialog open={editTarget !== null} onOpenChange={(o) => { if (!o) setEditTarget(null) }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>{t('workspaces.editTitle', { name: toLabel(editTarget?.name ?? '') })}</DialogTitle>
             <DialogDescription>{t('workspaces.editDesc')}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <Input
-              placeholder={t('workspaces.descPlaceholder')}
-              value={editDesc}
-              autoFocus
-              onChange={(e) => setEditDesc(e.target.value)}
-            />
-            <Select value={editStatus} onValueChange={setEditStatus}>
-              <SelectTrigger className="h-9">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="active">{t('workspaces.statusActive')}</SelectItem>
-                <SelectItem value="archived">{t('workspaces.statusArchived')}</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="space-y-4">
+            <div className="grid gap-1.5">
+              <label className="text-sm font-medium" htmlFor="edit-ws-desc">
+                {t('workspaces.descLabel')}
+              </label>
+              <Textarea
+                id="edit-ws-desc"
+                placeholder={t('workspaces.descPlaceholder')}
+                value={editDesc}
+                autoFocus
+                rows={3}
+                onChange={(e) => setEditDesc(e.target.value)}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <label className="text-sm font-medium">{t('workspaces.statusLabel')}</label>
+              <Select value={editStatus} onValueChange={setEditStatus}>
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">{t('workspaces.statusActive')}</SelectItem>
+                  <SelectItem value="archived">{t('workspaces.statusArchived')}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">{t('workspaces.archivedDesc')}</p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditTarget(null)} disabled={editing}>

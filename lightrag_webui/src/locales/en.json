@@ -123,7 +123,16 @@
     "updateError": "Failed to update workspace.",
     "moved": "Moved to \"{{name}}\"",
     "moveRemoved": "Removed from category",
-    "moveError": "Failed to set category"
+    "moveError": "Failed to set category",
+    "title": "Workspaces",
+    "description": "Isolated namespaces for documents and knowledge graphs.",
+    "searchPlaceholder": "Search workspaces…",
+    "noMatch": "No workspaces match the search.",
+    "createDialogDesc": "A workspace isolates documents, chunks and the knowledge graph for a team or project.",
+    "nameLabel": "Name",
+    "descLabel": "Description",
+    "statusLabel": "Status",
+    "archivedDesc": "Archived workspaces are read-only: queries keep working, writes are rejected."
   },
   "admin": {
     "title": "User Administration",
@@ -172,7 +181,31 @@
     "wsSelected": "{{count}} workspaces selected",
     "noWorkspaces": "No grantable workspaces",
     "wsSelectDesc": "Pick the workspaces this user may access; only those will be visible after login. Not needed for the admin role.",
-    "grantPartialError": "User created, but granting these workspaces failed: {{names}}"
+    "grantPartialError": "User created, but granting these workspaces failed: {{names}}",
+    "searchPlaceholder": "Search users…",
+    "createDesc": "Create an account and optionally grant workspace access.",
+    "usernameLabel": "Username",
+    "usernameRule": "1–64 characters: letters, digits, underscore, dot or hyphen.",
+    "passwordLabel": "Password",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
+    "roleLabel": "Role",
+    "roleDesc": {
+      "admin": "Full system access",
+      "manager": "Manage documents and query",
+      "viewer": "Query only"
+    },
+    "grantsLabel": "Initial workspace grants",
+    "grantLevelLabel": "Access level",
+    "editUser": "Edit user",
+    "editTitle": "Edit user \"{{username}}\"",
+    "editDesc": "Adjust the role or account status; use the password action to reset credentials.",
+    "enableLabel": "Account enabled",
+    "deleteTitle": "Delete user",
+    "deleteDesc": "User \"{{username}}\" and all workspace grants will be permanently deleted. This cannot be undone.",
+    "permAdminBypass": "Admins bypass workspace checks — every workspace is already accessible.",
+    "colCreatedAt": "Created",
+    "noMatch": "No users match the search."
   },
   "dashboard": {
     "title": "Dashboard",
