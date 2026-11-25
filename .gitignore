@@ -264,3 +264,9 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+
+# Local-only artifacts (not for the repo)
+# 610MB GGUF — exceeds GitHub's 100MB per-file hard limit, keep local only
+model/Qwen3-Reranker-0.6B-Q8_0-GGUF/
+# WorkBuddy agent workspace (local notes/logs)
+.workbuddy/
