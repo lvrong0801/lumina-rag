@@ -1,0 +1,50 @@
+diff --git a/dist/index.js b/dist/index.js
+index 06d9d5060b10358369b63a2843764be45be9abe9..c2187c692734da6773e0dd26568c40ec728a9ced 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -312,6 +312,7 @@ var SelectValue = /* @__PURE__ */ React.forwardRef(
+       onValueNodeHasChildrenChange(hasChildren);
+     }, [onValueNodeHasChildrenChange, hasChildren]);
+     const showPlaceholder = shouldShowPlaceholder(context.value);
++    const valueContent = showPlaceholder ? placeholder : children;
+     return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+       import_react_primitive.Primitive.span,
+       {
+@@ -319,7 +320,7 @@ var SelectValue = /* @__PURE__ */ React.forwardRef(
+         asChild: showPlaceholder ? false : valueProps.asChild,
+         ref: composedRefs,
+         style: { pointerEvents: "none" },
+-        children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(React.Fragment, { children: showPlaceholder ? placeholder : children }, showPlaceholder ? "placeholder" : "value")
++        children: valueProps.asChild && !showPlaceholder ? valueContent : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(React.Fragment, { children: valueContent }, showPlaceholder ? "placeholder" : "value")
+       }
+     );
+   }, "SelectValue")
+diff --git a/dist/index.mjs b/dist/index.mjs
+index d3c861eeb58b610e8fed2eadf48a39a4de7efdac..f52e50b1b9791da1a5a01475a891a4fd65f36072 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -242,6 +242,15 @@ var SelectValue = /* @__PURE__ */ React.forwardRef(
+       onValueNodeHasChildrenChange(hasChildren);
+     }, [onValueNodeHasChildrenChange, hasChildren]);
+     const showPlaceholder = shouldShowPlaceholder(context.value);
++    // PATCH (lightrag_webui): do NOT wrap children in a keyed Fragment when
++    // `asChild` is set. Radix passes `style: { pointerEvents: "none" }` here,
++    // and the Slot then merges that style into the wrapper Fragment, which
++    // makes React dev-mode log
++    //   "Invalid prop `style` supplied to `React.Fragment`..."
++    // on every re-render (e.g. clicking Scan/Retry on the documents page).
++    // With asChild the child is a single element, so it can be passed to the
++    // Slot directly. Upstream still has this in 2.4.1; revisit on upgrade.
++    const valueContent = showPlaceholder ? placeholder : children;
+     return /* @__PURE__ */ jsx(
+       Primitive.span,
+       {
+@@ -249,7 +258,7 @@ var SelectValue = /* @__PURE__ */ React.forwardRef(
+         asChild: showPlaceholder ? false : valueProps.asChild,
+         ref: composedRefs,
+         style: { pointerEvents: "none" },
+-        children: /* @__PURE__ */ jsx(React.Fragment, { children: showPlaceholder ? placeholder : children }, showPlaceholder ? "placeholder" : "value")
++        children: valueProps.asChild && !showPlaceholder ? valueContent : jsx(React.Fragment, { children: valueContent }, showPlaceholder ? "placeholder" : "value")
+       }
+     );
+   }, "SelectValue")
